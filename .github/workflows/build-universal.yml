@@ -19,9 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      FINAL_TAG: v1.0.11
-      FINAL_VERSION: 1.0.11
-      FINAL_VERSION_CODE: "12"
+      FINAL_TAG: v1.0.12
+      FINAL_VERSION: 1.0.12
+      FINAL_VERSION_CODE: "13"
       EXPECTED_CERT_SHA256: 74c178f3841343954e4a6c74223c4ef06df5cef270485c557d4f915f389845e2
     steps:
       - name: Check out source
@@ -88,7 +88,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PlexPlayUniversal-v1.0.11
+          name: PlexPlayUniversal-v1.0.12
           path: |
             source/PlexPlayUniversal.apk
             source/PlexPlayUniversal.apk.sha256
@@ -101,7 +101,7 @@ jobs:
         run: |
           if gh release view "$FINAL_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$FINAL_TAG" PlexPlayUniversal.apk PlexPlayUniversal.apk.sha256 --repo "$GITHUB_REPOSITORY" --clobber
-            gh release edit "$FINAL_TAG" --repo "$GITHUB_REPOSITORY" --title "Plex Play Universal v${FINAL_VERSION}" --notes-file RELEASE_NOTES_v1.0.11.md --latest
+            gh release edit "$FINAL_TAG" --repo "$GITHUB_REPOSITORY" --title "Plex Play Universal v${FINAL_VERSION}" --notes-file RELEASE_NOTES_v1.0.12.md --latest
           else
-            gh release create "$FINAL_TAG" PlexPlayUniversal.apk PlexPlayUniversal.apk.sha256 --repo "$GITHUB_REPOSITORY" --title "Plex Play Universal v${FINAL_VERSION}" --notes-file RELEASE_NOTES_v1.0.11.md --latest
+            gh release create "$FINAL_TAG" PlexPlayUniversal.apk PlexPlayUniversal.apk.sha256 --repo "$GITHUB_REPOSITORY" --title "Plex Play Universal v${FINAL_VERSION}" --notes-file RELEASE_NOTES_v1.0.12.md --latest
           fi
