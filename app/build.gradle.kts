@@ -4,6 +4,17 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val plexReleaseStorePath = System.getenv("PLEX_RELEASE_KEYSTORE")
+val plexReleaseStorePassword = System.getenv("PLEX_RELEASE_STORE_PASSWORD")
+val plexReleaseKeyAlias = System.getenv("PLEX_RELEASE_KEY_ALIAS")
+val plexReleaseKeyPassword = System.getenv("PLEX_RELEASE_KEY_PASSWORD")
+val plexReleaseSigningReady = listOf(
+    plexReleaseStorePath,
+    plexReleaseStorePassword,
+    plexReleaseKeyAlias,
+    plexReleaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "io.mirr.plexplay"
     compileSdk = 36
@@ -12,16 +23,31 @@ android {
         applicationId = "io.mirr.plexplay.universal"
         minSdk = 26
         targetSdk = 36
-        versionCode = 11
-        versionName = "1.0.10"
+        versionCode = 12
+        versionName = "1.0.11"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
 
+    signingConfigs {
+        if (plexReleaseSigningReady) {
+            create("plexRelease") {
+                storeFile = rootProject.file(plexReleaseStorePath!!)
+                storePassword = plexReleaseStorePassword
+                keyAlias = plexReleaseKeyAlias
+                keyPassword = plexReleaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (plexReleaseSigningReady) {
+                signingConfigs.getByName("plexRelease")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = false
             isShrinkResources = false
             proguardFiles(
@@ -54,6 +80,19 @@ android {
 kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
+gradle.taskGraph.whenReady {
+    val releaseRequested = allTasks.any { task ->
+        task.name.contains("release", ignoreCase = true)
+    }
+    if (releaseRequested && !plexReleaseSigningReady) {
+        throw GradleException(
+            "Release signing is not configured. Set PLEX_RELEASE_KEYSTORE, " +
+                "PLEX_RELEASE_STORE_PASSWORD, PLEX_RELEASE_KEY_ALIAS and " +
+                "PLEX_RELEASE_KEY_PASSWORD.",
+        )
     }
 }
 
