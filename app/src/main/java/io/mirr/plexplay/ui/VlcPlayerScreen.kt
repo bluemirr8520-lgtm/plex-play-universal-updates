@@ -192,6 +192,45 @@ private data class VlcVideoSettings(
     )
 }
 
+private const val VlcVideoSettingsSchemaKey = "vlc_video_settings_schema"
+private const val VlcVideoSettingsSchema = 2
+private const val VlcVideoPresetSchemaSuffix = "settings_schema"
+
+/**
+ * Keeps the neutral picture path truly neutral and rejects stale/corrupt values.
+ *
+ * Older builds shared the window-brightness preference with screen controls that
+ * used a different scale. On the first schema-2 load, reset only that physical
+ * display override to the current neutral default. Subsequent user adjustments
+ * are retained. Named picture modes are canonical presets; only CUSTOM stores
+ * independent slider values.
+ */
+private fun VlcVideoSettings.normalizedForPlayback(
+    resetLegacyWindowBrightness: Boolean = false,
+): VlcVideoSettings {
+    val normalizedWindowBrightness = if (resetLegacyWindowBrightness) {
+        VlcVideoSettings().screenBrightness
+    } else {
+        screenBrightness.takeIf { it.isFinite() }
+            ?.coerceIn(1f, 100f)
+            ?: VlcVideoSettings().screenBrightness
+    }
+    val normalizedPicture = when (pictureMode) {
+        VlcPictureMode.CUSTOM -> copy(
+            pictureBrightness = pictureBrightness.sanitizedVlcPictureValue(),
+            pictureContrast = pictureContrast.sanitizedVlcPictureValue(),
+            pictureBlackLevel = pictureBlackLevel.sanitizedVlcPictureValue(),
+            pictureColorDepth = pictureColorDepth.sanitizedVlcPictureValue(),
+            pictureColorTemperature = pictureColorTemperature.sanitizedVlcPictureValue(),
+        )
+        else -> applyPictureMode(pictureMode)
+    }
+    return normalizedPicture.copy(screenBrightness = normalizedWindowBrightness)
+}
+
+private fun Float.sanitizedVlcPictureValue(): Float =
+    takeIf { it.isFinite() }?.coerceIn(-50f, 50f) ?: 0f
+
 private enum class VlcOptimizationMode(
     val storage: String,
     val label: String,
@@ -410,6 +449,7 @@ fun VlcPlayerScreen(
     val playButtonFocusRequester = remember { FocusRequester() }
     val forwardButtonFocusRequester = remember { FocusRequester() }
     val nextButtonFocusRequester = remember { FocusRequester() }
+    val settingsButtonFocusRequester = remember { FocusRequester() }
     val latestAutoPlayNext by rememberUpdatedState(autoPlayNext)
     val latestHasNextPlayback by rememberUpdatedState(hasNextPlayback)
     val latestOnPlaybackCompleted by rememberUpdatedState(onPlaybackCompleted)
@@ -593,11 +633,12 @@ fun VlcPlayerScreen(
     }
 
     fun updateVideoSettings(value: VlcVideoSettings) {
+        val normalized = value.normalizedForPlayback()
         selectedVideoPreset = 0
-        videoSettings = value
-        preferences.saveVlcVideoSettings(value)
-        applyVlcWindowBrightness(activity, value.screenBrightness)
-        videoLayout?.let { applyVlcVideoAppearance(it, value) }
+        videoSettings = normalized
+        preferences.saveVlcVideoSettings(normalized)
+        applyVlcWindowBrightness(activity, normalized.screenBrightness)
+        videoLayout?.let { applyVlcVideoAppearance(it, normalized) }
     }
 
     fun seekBy(deltaMs: Long) {
@@ -1598,12 +1639,15 @@ fun VlcPlayerScreen(
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    IconButton(onClick = {
-                        settingsPage = VlcSettingsPage.MAIN
-                        settingsVisible = true
-                    }) {
-                        Icon(Icons.Rounded.Settings, "재생 설정", tint = Color.White)
-                    }
+                    VlcPlayerSettingsButton(
+                        onClick = {
+                            settingsPage = VlcSettingsPage.MAIN
+                            settingsVisible = true
+                        },
+                        modifier = Modifier
+                            .focusRequester(settingsButtonFocusRequester)
+                            .focusProperties { down = playButtonFocusRequester },
+                    )
                 }
 
                 Row(
@@ -1641,6 +1685,7 @@ fun VlcPlayerScreen(
                             .focusProperties {
                                 left = rewindButtonFocusRequester
                                 right = forwardButtonFocusRequester
+                                up = settingsButtonFocusRequester
                             },
                         icon = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                         contentDescription = if (isPlaying) "일시정지" else "재생",
@@ -1654,6 +1699,7 @@ fun VlcPlayerScreen(
                             .focusProperties {
                                 left = playButtonFocusRequester
                                 right = nextButtonFocusRequester
+                                up = settingsButtonFocusRequester
                             },
                         icon = Icons.Rounded.FastForward,
                         contentDescription = "10초 앞으로",
@@ -1664,7 +1710,10 @@ fun VlcPlayerScreen(
                         modifier = Modifier
                             .size(56.dp)
                             .focusRequester(nextButtonFocusRequester)
-                            .focusProperties { left = forwardButtonFocusRequester },
+                            .focusProperties {
+                                left = forwardButtonFocusRequester
+                                up = settingsButtonFocusRequester
+                            },
                         icon = Icons.Rounded.SkipNext,
                         contentDescription = nextPlaybackTitle ?: "다음화",
                     )
@@ -1936,6 +1985,7 @@ private fun VlcSettingsDialog(
     val subtitleHorizontalFocusRequester = remember { FocusRequester() }
     val subtitleVerticalFocusRequester = remember { FocusRequester() }
     val subtitlePositionResetFocusRequester = remember { FocusRequester() }
+    val advancedDisplayFocusRequesters = remember { List(6) { FocusRequester() } }
 
     AlertDialog(
         onDismissRequest = onNavigateBack,
@@ -2307,6 +2357,8 @@ private fun VlcSettingsDialog(
                             label = "화면 밝기",
                             value = videoSettings.screenBrightness,
                             range = 1f..100f,
+                            focusRequester = advancedDisplayFocusRequesters[0],
+                            down = advancedDisplayFocusRequesters[1],
                             onValueChange = {
                                 onVideoSettingsChanged(videoSettings.copy(screenBrightness = it))
                             },
@@ -2315,6 +2367,9 @@ private fun VlcSettingsDialog(
                             label = "명암",
                             value = videoSettings.pictureContrast,
                             range = -50f..50f,
+                            focusRequester = advancedDisplayFocusRequesters[1],
+                            up = advancedDisplayFocusRequesters[0],
+                            down = advancedDisplayFocusRequesters[2],
                             onValueChange = {
                                 onVideoSettingsChanged(
                                     videoSettings.copy(
@@ -2328,6 +2383,9 @@ private fun VlcSettingsDialog(
                             label = "밝기",
                             value = videoSettings.pictureBrightness,
                             range = -50f..50f,
+                            focusRequester = advancedDisplayFocusRequesters[2],
+                            up = advancedDisplayFocusRequesters[1],
+                            down = advancedDisplayFocusRequesters[3],
                             onValueChange = {
                                 onVideoSettingsChanged(
                                     videoSettings.copy(
@@ -2341,6 +2399,9 @@ private fun VlcSettingsDialog(
                             label = "블랙 레벨",
                             value = videoSettings.pictureBlackLevel,
                             range = -50f..50f,
+                            focusRequester = advancedDisplayFocusRequesters[3],
+                            up = advancedDisplayFocusRequesters[2],
+                            down = advancedDisplayFocusRequesters[4],
                             onValueChange = {
                                 onVideoSettingsChanged(
                                     videoSettings.copy(
@@ -2354,6 +2415,9 @@ private fun VlcSettingsDialog(
                             label = "색 농도",
                             value = videoSettings.pictureColorDepth,
                             range = -50f..50f,
+                            focusRequester = advancedDisplayFocusRequesters[4],
+                            up = advancedDisplayFocusRequesters[3],
+                            down = advancedDisplayFocusRequesters[5],
                             onValueChange = {
                                 onVideoSettingsChanged(
                                     videoSettings.copy(
@@ -2367,6 +2431,8 @@ private fun VlcSettingsDialog(
                             label = "색 온도",
                             value = videoSettings.pictureColorTemperature,
                             range = -50f..50f,
+                            focusRequester = advancedDisplayFocusRequesters[5],
+                            up = advancedDisplayFocusRequesters[4],
                             onValueChange = {
                                 onVideoSettingsChanged(
                                     videoSettings.copy(
@@ -2453,6 +2519,39 @@ private fun VlcSettingsDialog(
 }
 
 @Composable
+private fun VlcPlayerSettingsButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var focused by remember { mutableStateOf(false) }
+    Surface(
+        color = if (focused) Color(0xFFFFD400) else Color.Black.copy(alpha = .62f),
+        contentColor = if (focused) Color.Black else Color.White,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(
+            width = if (focused) 4.dp else 1.dp,
+            color = if (focused) Color.White else Color.White.copy(alpha = .45f),
+        ),
+        modifier = Modifier.size(64.dp),
+    ) {
+        IconButton(
+            onClick = onClick,
+            modifier = Modifier
+                .fillMaxSize()
+                .then(modifier)
+                .onFocusChanged { focused = it.isFocused || it.hasFocus },
+        ) {
+            Icon(
+                Icons.Rounded.Settings,
+                contentDescription = "재생 설정",
+                tint = if (focused) Color.Black else Color.White,
+                modifier = Modifier.size(36.dp),
+            )
+        }
+    }
+}
+
+@Composable
 private fun VlcPlayerControlButton(
     onClick: () -> Unit,
     icon: ImageVector,
@@ -2524,23 +2623,53 @@ private fun VlcValueSlider(
                     }
                     .onPreviewKeyEvent { event ->
                         val nativeEvent = event.nativeKeyEvent
-                        val direction = when (nativeEvent.keyCode) {
-                            AndroidKeyEvent.KEYCODE_DPAD_UP -> FocusDirection.Up
-                            AndroidKeyEvent.KEYCODE_DPAD_DOWN -> FocusDirection.Down
-                            else -> return@onPreviewKeyEvent false
-                        }
-                        if (
-                            nativeEvent.action == AndroidKeyEvent.ACTION_DOWN &&
-                            nativeEvent.repeatCount == 0
-                        ) {
-                            val target = if (direction == FocusDirection.Up) up else down
-                            if (target != null) {
-                                runCatching { target.requestFocus() }
-                            } else {
-                                focusManager.moveFocus(direction)
+                        when (nativeEvent.keyCode) {
+                            AndroidKeyEvent.KEYCODE_DPAD_LEFT,
+                            AndroidKeyEvent.KEYCODE_DPAD_RIGHT,
+                            -> {
+                                // Material Slider의 기본 DPAD 처리까지 전달되면 재구성 중
+                                // 다른 Slider가 같은 키를 이어받을 수 있으므로 여기서 완전히 소비한다.
+                                if (nativeEvent.action == AndroidKeyEvent.ACTION_DOWN) {
+                                    val delta = if (
+                                        nativeEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_RIGHT
+                                    ) {
+                                        1f
+                                    } else {
+                                        -1f
+                                    }
+                                    onValueChange(
+                                        (value + delta).coerceIn(range.start, range.endInclusive),
+                                    )
+                                }
+                                true
                             }
+
+                            AndroidKeyEvent.KEYCODE_DPAD_UP,
+                            AndroidKeyEvent.KEYCODE_DPAD_DOWN,
+                            -> {
+                                if (
+                                    nativeEvent.action == AndroidKeyEvent.ACTION_DOWN &&
+                                    nativeEvent.repeatCount == 0
+                                ) {
+                                    val direction = if (
+                                        nativeEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_UP
+                                    ) {
+                                        FocusDirection.Up
+                                    } else {
+                                        FocusDirection.Down
+                                    }
+                                    val target = if (direction == FocusDirection.Up) up else down
+                                    if (target != null) {
+                                        runCatching { target.requestFocus() }
+                                    } else {
+                                        focusManager.moveFocus(direction)
+                                    }
+                                }
+                                true
+                            }
+
+                            else -> false
                         }
-                        true
                     }
                     .onFocusChanged { focused = it.isFocused || it.hasFocus },
                 colors = SliderDefaults.colors(
@@ -2699,28 +2828,43 @@ private fun android.content.SharedPreferences.saveVlcSubtitleStyle(style: VlcSub
         .apply()
 }
 
-private fun android.content.SharedPreferences.loadVlcVideoSettings(): VlcVideoSettings =
-    VlcVideoSettings(
-        screenBrightness = getFloat("video_brightness_percent", 100f).coerceIn(1f, 100f),
+private fun android.content.SharedPreferences.loadVlcVideoSettings(): VlcVideoSettings {
+    val needsBrightnessMigration = getInt(VlcVideoSettingsSchemaKey, 0) < VlcVideoSettingsSchema
+    val loaded = VlcVideoSettings(
+        screenBrightness = getFloat("video_brightness_percent", 100f),
         pictureMode = VlcPictureMode.fromStorage(getString("video_picture_mode", null)),
-        pictureBrightness = getFloat("video_picture_brightness", 0f).coerceIn(-50f, 50f),
-        pictureContrast = getFloat("video_picture_contrast", 0f).coerceIn(-50f, 50f),
-        pictureBlackLevel = getFloat("video_picture_black_level", 0f).coerceIn(-50f, 50f),
-        pictureColorDepth = getFloat("video_picture_color_depth", 0f).coerceIn(-50f, 50f),
-        pictureColorTemperature = getFloat("video_picture_color_temperature", 0f)
-            .coerceIn(-50f, 50f),
+        pictureBrightness = getFloat("video_picture_brightness", 0f),
+        pictureContrast = getFloat("video_picture_contrast", 0f),
+        pictureBlackLevel = getFloat("video_picture_black_level", 0f),
+        pictureColorDepth = getFloat("video_picture_color_depth", 0f),
+        pictureColorTemperature = getFloat("video_picture_color_temperature", 0f),
     )
+    val normalized = loaded.normalizedForPlayback(
+        resetLegacyWindowBrightness = needsBrightnessMigration,
+    )
+    if (needsBrightnessMigration || normalized != loaded) {
+        saveVlcVideoSettings(normalized)
+    }
+    return normalized
+}
 
 private fun android.content.SharedPreferences.saveVlcVideoSettings(value: VlcVideoSettings) {
+    val normalized = value.normalizedForPlayback()
     edit()
+        .putInt(VlcVideoSettingsSchemaKey, VlcVideoSettingsSchema)
         .putBoolean("video_picture_controls_v1", true)
-        .putFloat("video_brightness_percent", value.screenBrightness)
-        .putString("video_picture_mode", value.pictureMode.storage)
-        .putFloat("video_picture_brightness", value.pictureBrightness)
-        .putFloat("video_picture_contrast", value.pictureContrast)
-        .putFloat("video_picture_black_level", value.pictureBlackLevel)
-        .putFloat("video_picture_color_depth", value.pictureColorDepth)
-        .putFloat("video_picture_color_temperature", value.pictureColorTemperature)
+        .putFloat("video_brightness_percent", normalized.screenBrightness)
+        .putString("video_picture_mode", normalized.pictureMode.storage)
+        .putFloat("video_picture_brightness", normalized.pictureBrightness)
+        .putFloat("video_picture_contrast", normalized.pictureContrast)
+        .putFloat("video_picture_black_level", normalized.pictureBlackLevel)
+        .putFloat("video_picture_color_depth", normalized.pictureColorDepth)
+        .putFloat("video_picture_color_temperature", normalized.pictureColorTemperature)
+        .remove("video_brightness")
+        .remove("video_tone_brightness")
+        .remove("video_contrast")
+        .remove("video_saturation")
+        .remove("video_color_temperature")
         .apply()
 }
 
@@ -2733,16 +2877,18 @@ private fun android.content.SharedPreferences.saveVlcVideoPreset(
     scale: VlcVideoScale,
 ): Boolean {
     val prefix = "video_screen_preset_${slot}_"
+    val normalized = settings.normalizedForPlayback()
     return edit()
         .putBoolean("${prefix}saved", true)
-        .putFloat("${prefix}brightness", settings.screenBrightness)
+        .putInt("$prefix$VlcVideoPresetSchemaSuffix", VlcVideoSettingsSchema)
+        .putFloat("${prefix}brightness", normalized.screenBrightness)
         .putString("${prefix}scale_mode", scale.storage)
-        .putString("${prefix}picture_mode", settings.pictureMode.storage)
-        .putFloat("${prefix}picture_brightness", settings.pictureBrightness)
-        .putFloat("${prefix}picture_contrast", settings.pictureContrast)
-        .putFloat("${prefix}picture_black_level", settings.pictureBlackLevel)
-        .putFloat("${prefix}picture_color_depth", settings.pictureColorDepth)
-        .putFloat("${prefix}picture_color_temperature", settings.pictureColorTemperature)
+        .putString("${prefix}picture_mode", normalized.pictureMode.storage)
+        .putFloat("${prefix}picture_brightness", normalized.pictureBrightness)
+        .putFloat("${prefix}picture_contrast", normalized.pictureContrast)
+        .putFloat("${prefix}picture_black_level", normalized.pictureBlackLevel)
+        .putFloat("${prefix}picture_color_depth", normalized.pictureColorDepth)
+        .putFloat("${prefix}picture_color_temperature", normalized.pictureColorTemperature)
         .commit()
 }
 
@@ -2751,16 +2897,25 @@ private fun android.content.SharedPreferences.loadVlcVideoPreset(
 ): Pair<VlcVideoSettings, VlcVideoScale>? {
     val prefix = "video_screen_preset_${slot}_"
     if (!getBoolean("${prefix}saved", false)) return null
-    return VlcVideoSettings(
-        screenBrightness = getFloat("${prefix}brightness", 100f).coerceIn(1f, 100f),
+    val needsBrightnessMigration =
+        getInt("$prefix$VlcVideoPresetSchemaSuffix", 0) < VlcVideoSettingsSchema
+    val loaded = VlcVideoSettings(
+        screenBrightness = getFloat("${prefix}brightness", 100f),
         pictureMode = VlcPictureMode.fromStorage(getString("${prefix}picture_mode", null)),
-        pictureBrightness = getFloat("${prefix}picture_brightness", 0f).coerceIn(-50f, 50f),
-        pictureContrast = getFloat("${prefix}picture_contrast", 0f).coerceIn(-50f, 50f),
-        pictureBlackLevel = getFloat("${prefix}picture_black_level", 0f).coerceIn(-50f, 50f),
-        pictureColorDepth = getFloat("${prefix}picture_color_depth", 0f).coerceIn(-50f, 50f),
-        pictureColorTemperature = getFloat("${prefix}picture_color_temperature", 0f)
-            .coerceIn(-50f, 50f),
-    ) to VlcVideoScale.fromStorage(getString("${prefix}scale_mode", null))
+        pictureBrightness = getFloat("${prefix}picture_brightness", 0f),
+        pictureContrast = getFloat("${prefix}picture_contrast", 0f),
+        pictureBlackLevel = getFloat("${prefix}picture_black_level", 0f),
+        pictureColorDepth = getFloat("${prefix}picture_color_depth", 0f),
+        pictureColorTemperature = getFloat("${prefix}picture_color_temperature", 0f),
+    )
+    val normalized = loaded.normalizedForPlayback(
+        resetLegacyWindowBrightness = needsBrightnessMigration,
+    )
+    val scale = VlcVideoScale.fromStorage(getString("${prefix}scale_mode", null))
+    if (needsBrightnessMigration || normalized != loaded) {
+        saveVlcVideoPreset(slot, normalized, scale)
+    }
+    return normalized to scale
 }
 
 private fun VlcSubtitleStyle.toSharedSubtitleAppearance(): SubtitleAppearance =
@@ -2868,7 +3023,10 @@ private fun VlcOptimizationMode.cachingMs(): Int = when (this) {
 }
 
 private fun applyVlcWindowBrightness(activity: Activity?, brightnessPercent: Float) {
-    val brightness = (brightnessPercent / 100f).coerceIn(.01f, 1f)
+    val safePercent = brightnessPercent.takeIf { it.isFinite() }
+        ?.coerceIn(1f, 100f)
+        ?: VlcVideoSettings().screenBrightness
+    val brightness = (safePercent / 100f).coerceIn(.01f, 1f)
     activity?.window?.let { window ->
         window.attributes = window.attributes.apply {
             screenBrightness = brightness
@@ -2892,9 +3050,13 @@ private fun applyVlcVideoScale(layout: VLCVideoLayout, mode: VlcVideoScale) {
 }
 
 private fun applyVlcVideoAppearance(layout: VLCVideoLayout, settings: VlcVideoSettings) {
-    layout.setLayerType(View.LAYER_TYPE_NONE, null)
+    // LibVLC's compatibility output is a SurfaceView (attachViews(..., false)).
+    // SurfaceView pixels are composed outside this hierarchy, so forcing a
+    // ColorMatrix on the container cannot adjust the video and can make some TV
+    // compositors dim the whole layer. Keep that path untouched. If LibVLC uses
+    // a TextureView on a supported device, the same neutral-safe paint applies.
     val target = layout.findFirstTextureView() ?: return
-    val paint = buildVlcVideoLayerPaint(settings)
+    val paint = buildVlcVideoLayerPaint(settings.normalizedForPlayback())
     if (paint == null) {
         target.setLayerType(View.LAYER_TYPE_NONE, null)
     } else {
@@ -2913,11 +3075,12 @@ private fun View.findFirstTextureView(): TextureView? {
 }
 
 private fun buildVlcVideoLayerPaint(settings: VlcVideoSettings): Paint? {
-    val pictureBrightness = settings.pictureBrightness.coerceIn(-50f, 50f)
-    val pictureContrast = settings.pictureContrast.coerceIn(-50f, 50f)
-    val pictureBlackLevel = settings.pictureBlackLevel.coerceIn(-50f, 50f)
-    val pictureColorDepth = settings.pictureColorDepth.coerceIn(-50f, 50f)
-    val pictureColorTemperature = settings.pictureColorTemperature.coerceIn(-50f, 50f)
+    val normalized = settings.normalizedForPlayback()
+    val pictureBrightness = normalized.pictureBrightness
+    val pictureContrast = normalized.pictureContrast
+    val pictureBlackLevel = normalized.pictureBlackLevel
+    val pictureColorDepth = normalized.pictureColorDepth
+    val pictureColorTemperature = normalized.pictureColorTemperature
     if (
         pictureBrightness == 0f &&
         pictureContrast == 0f &&
