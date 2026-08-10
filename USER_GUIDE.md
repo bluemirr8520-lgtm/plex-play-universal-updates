@@ -1,7 +1,7 @@
-# Plex Play Universal 1.0.10 사용 설명서
+# Plex Play Universal 1.0.11 사용 설명서
 
 Plex Play Universal은 개인 Plex Media Server의 콘텐츠를 Android 휴대폰, 태블릿·폴더블,
-Android TV·OTT 기기에서 탐색하고 범용 코덱으로 재생하는 앱입니다. 이 문서는 1.0.10 버전을
+Android TV·OTT 기기에서 탐색하고 범용 코덱으로 재생하는 앱입니다. 이 문서는 1.0.11 버전을
 기준으로 작성되었습니다.
 
 ## 1. 지원 환경

@@ -63,7 +63,7 @@ AAC, AC-3, E-AC-3, DTS, FLAC, Vorbis, Opus 계열 오디오를 폭넓게 처리�
 
 - 앱 이름: `Plex Play Universal`
 - applicationId: `io.mirr.plexplay.universal`
-- 현재 버전: `1.0.10`
+- 현재 버전: `1.0.11`
 - 업데이트 채널: `bluemirr8520-lgtm/plex-play-universal-updates`
 - APK 파일명: `PlexPlayUniversal.apk`
 
