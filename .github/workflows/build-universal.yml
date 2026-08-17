@@ -112,10 +112,8 @@ jobs:
           rm -rf main-build
           rsync -a --exclude '.git' --exclude '.github' --exclude '.gradle' --exclude 'build' source/ main-build/
           bash source/scripts/prepare-main-overlay.sh main-build
-          printf '%s  %s
-' 5b81034a4951a561ba3c11201b7972dd6e4b18c9c76ca0f7f46bd7758c280d48 main-build/app/src/main/res/drawable-nodpi/ic_launcher_cyber.png | sha256sum -c -
-          printf '%s  %s
-' f8bede13fd2884d62279a983d4d583624befcd61818d9757a0b640c7bd035fc6 main-build/app/src/main/res/drawable-nodpi/tv_banner.png | sha256sum -c -
+          test "$(sha256sum main-build/app/src/main/res/drawable-nodpi/ic_launcher_cyber.png | awk '{print $1}')" = 5b81034a4951a561ba3c11201b7972dd6e4b18c9c76ca0f7f46bd7758c280d48
+          test "$(sha256sum main-build/app/src/main/res/drawable-nodpi/tv_banner.png | awk '{print $1}')" = f8bede13fd2884d62279a983d4d583624befcd61818d9757a0b640c7bd035fc6
 
           cp source/app/build.gradle.kts main-build/app/build.gradle.kts
           python3 - <<'PY'
@@ -134,19 +132,13 @@ jobs:
                   raise SystemExit(f"{path}: expected one {before!r}, got {count}")
               text = text.replace(before, after, 1)
           for removable in [
-              "        jniLibs.useLegacyPackaging = true
-",
-              '    implementation(files("libs/libvlc-all-3.7.5.aar"))
-',
+              "        jniLibs.useLegacyPackaging = true",
+              '    implementation(files("libs/libvlc-all-3.7.5.aar"))',
           ]:
-              normalized = text.replace("
-", "
-")
-              count = normalized.count(removable)
+              count = text.count(removable)
               if count != 1:
-                  raise SystemExit(f"{path}: expected one removable line {removable!r}, got {count}")
-              normalized = normalized.replace(removable, "", 1)
-              text = normalized
+                  raise SystemExit(f"{path}: expected one removable entry {removable!r}, got {count}")
+              text = text.replace(removable, "", 1)
           path.write_text(text, encoding="utf-8")
           PY
           rm -rf main-build/app/libs
