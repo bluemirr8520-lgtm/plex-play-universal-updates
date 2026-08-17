@@ -519,13 +519,16 @@ internal data class SubtitleAppearance(
     val edgeColor: Int = android.graphics.Color.BLACK,
 )
 
-private data class VerticalSubtitleGlyph(
+internal data class VerticalSubtitleGlyph(
     val text: String,
     val rotate: Boolean = false,
     val spacer: Boolean = false,
     val advanceScale: Float = 1f,
     val centerInCell: Boolean = false,
+    val measureRotatedTextAdvance: Boolean = false,
 )
+
+internal const val VerticalSubtitleRightRotationDegrees = 90f
 
 private data class VideoScreenSettings(
     val brightness: Float = 100f,
@@ -4465,7 +4468,21 @@ private class VerticalSubtitleView(context: Context) : View(context) {
             }
             ?: Int.MAX_VALUE
         val maxColumnAdvance = maxVerticalColumnAdvance(availableHeight)
-        val columns = sourceColumns.wrapVerticalSubtitleColumns(maxColumnAdvance)
+        val measuredSourceColumns = sourceColumns.map { glyphs ->
+            glyphs.map { glyph ->
+                if (!glyph.measureRotatedTextAdvance) {
+                    glyph
+                } else {
+                    glyph.copy(
+                        advanceScale = (
+                            (fillPaint.measureText(glyph.text) + outlineStrokeWidth * 2f) /
+                                glyphAdvancePx
+                            ).coerceAtLeast(1f),
+                    )
+                }
+            }
+        }
+        val columns = measuredSourceColumns.wrapVerticalSubtitleColumns(maxColumnAdvance)
         measuredColumns = columns
         val columnCount = columns.size.coerceAtLeast(1)
         val measuredColumnAdvance = columns.maxOfOrNull { it.verticalAdvance() } ?: 1f
@@ -4519,7 +4536,12 @@ private class VerticalSubtitleView(context: Context) : View(context) {
         x: Float,
         baseline: Float,
     ) {
-        val cellCenterY = baseline + (fillPaint.ascent() + fillPaint.descent()) / 2f
+        val baseCellCenterY = baseline + (fillPaint.ascent() + fillPaint.descent()) / 2f
+        val cellCenterY = if (glyph.measureRotatedTextAdvance) {
+            baseCellCenterY + glyphAdvancePx * (glyph.advanceScale - 1f) / 2f
+        } else {
+            baseCellCenterY
+        }
         val drawPosition = if (glyph.centerInCell) {
             centeredGlyphPosition(glyph.text, x, cellCenterY)
         } else {
@@ -4535,7 +4557,7 @@ private class VerticalSubtitleView(context: Context) : View(context) {
         }
         if (glyph.rotate) {
             canvas.save()
-            canvas.rotate(90f, x, cellCenterY)
+            canvas.rotate(VerticalSubtitleRightRotationDegrees, x, cellCenterY)
         }
         if (subtitleEdgeType == CaptionStyleCompat.EDGE_TYPE_OUTLINE) {
             canvas.drawText(glyph.text, drawX, drawBaseline, edgePaint)
@@ -4778,7 +4800,7 @@ private fun List<VerticalSubtitleGlyph>.wrapLongVerticalSubtitleWord(
     return columns
 }
 
-private fun String.toVerticalSubtitleGlyphs(): List<VerticalSubtitleGlyph> {
+internal fun String.toVerticalSubtitleGlyphs(): List<VerticalSubtitleGlyph> {
     val codePoints = codePoints().toArray()
     val glyphs = mutableListOf<VerticalSubtitleGlyph>()
     var index = 0
@@ -4793,6 +4815,24 @@ private fun String.toVerticalSubtitleGlyphs(): List<VerticalSubtitleGlyph> {
                 advanceScale = .22f,
             )
             index++
+            continue
+        }
+        if (isAsciiEnglishLetter(codePoint)) {
+            val start = index
+            while (index < codePoints.size && isAsciiEnglishLetter(codePoints[index])) {
+                index++
+            }
+            val englishRun = codePoints.copyOfRange(start, index).toCodePointString()
+            glyphs += if (index - start == 1) {
+                VerticalSubtitleGlyph(englishRun)
+            } else {
+                VerticalSubtitleGlyph(
+                    text = englishRun,
+                    rotate = true,
+                    centerInCell = true,
+                    measureRotatedTextAdvance = true,
+                )
+            }
             continue
         }
         if (isEllipsisDot(codePoint)) {
@@ -4854,6 +4894,9 @@ private fun String.toVerticalSubtitleGlyphs(): List<VerticalSubtitleGlyph> {
     }
     return glyphs
 }
+
+private fun isAsciiEnglishLetter(codePoint: Int): Boolean =
+    codePoint in 'A'.code..'Z'.code || codePoint in 'a'.code..'z'.code
 
 private fun List<VerticalSubtitleGlyph>.verticalAdvance(): Float =
     sumOf { it.advanceScale.toDouble() }.toFloat()
