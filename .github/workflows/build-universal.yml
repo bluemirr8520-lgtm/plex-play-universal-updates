@@ -1,10 +1,10 @@
-name: Build verified vertical subtitle releases
+name: Build Plex Play and Universal
 
 on:
   workflow_dispatch:
     inputs:
       source_tag:
-        description: Pinned LibVLC asset release tag
+        description: LibVLC asset release tag
         required: true
         default: source-v1.0.10
 
@@ -12,44 +12,28 @@ permissions:
   contents: write
 
 concurrency:
-  group: vertical-english-subtitle-release
+  group: plex-play-dual-release
   cancel-in-progress: false
-
-env:
-  UNIVERSAL_TAG: v1.0.13
-  UNIVERSAL_VERSION: 1.0.13
-  UNIVERSAL_VERSION_CODE: "14"
-  MAIN_TEMP_TAG: plex-play-v3.19.26-build
-  MAIN_VERSION: 3.19.26
-  MAIN_VERSION_CODE: "178"
-  EXPECTED_CERT_SHA256: 74c178f3841343954e4a6c74223c4ef06df5cef270485c557d4f915f389845e2
 
 jobs:
   build:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 60
+    env:
+      UNIVERSAL_TAG: v1.0.14
+      UNIVERSAL_VERSION: 1.0.14
+      UNIVERSAL_VERSION_CODE: "15"
+      MAIN_TAG: plex-play-v3.19.27-build
+      MAIN_VERSION: 3.19.27
+      MAIN_VERSION_CODE: "179"
+      EXPECTED_CERT_SHA256: 74c178f3841343954e4a6c74223c4ef06df5cef270485c557d4f915f389845e2
     steps:
-      - name: Check out source
+      - name: Check out release source
         uses: actions/checkout@v4
         with:
           path: source
-
-      - name: Restore fixed release signing key
-        env:
-          KEYSTORE_B64: ${{ secrets.PLEX_RELEASE_KEYSTORE_B64 }}
-        run: |
-          set -euo pipefail
-          test -n "$KEYSTORE_B64"
-          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/plex-release.keystore"
-          chmod 600 "$RUNNER_TEMP/plex-release.keystore"
-          mkdir -p "$HOME/.android"
-          cp "$RUNNER_TEMP/plex-release.keystore" "$HOME/.android/debug.keystore"
-          {
-            echo "PLEX_RELEASE_KEYSTORE=$RUNNER_TEMP/plex-release.keystore"
-            echo "PLEX_RELEASE_STORE_PASSWORD=android"
-            echo "PLEX_RELEASE_KEY_ALIAS=androiddebugkey"
-            echo "PLEX_RELEASE_KEY_PASSWORD=android"
-          } >> "$GITHUB_ENV"
+          fetch-depth: 0
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -63,99 +47,93 @@ jobs:
       - name: Install Android API 36
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
+      - name: Restore fixed release signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.PLEX_RELEASE_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_B64"
+          key_path="$RUNNER_TEMP/plex-release.keystore"
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$key_path"
+          test -s "$key_path"
+          mkdir -p "$HOME/.android"
+          install -m 600 "$key_path" "$HOME/.android/debug.keystore"
+          {
+            printf 'PLEX_RELEASE_KEYSTORE=%s\n' "$key_path"
+            printf 'PLEX_RELEASE_STORE_PASSWORD=android\n'
+            printf 'PLEX_RELEASE_KEY_ALIAS=androiddebugkey\n'
+            printf 'PLEX_RELEASE_KEY_PASSWORD=android\n'
+          } >> "$GITHUB_ENV"
+
       - name: Download pinned LibVLC
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_TAG: ${{ inputs.source_tag }}
         run: |
           set -euo pipefail
-          rm -rf "$RUNNER_TEMP/vlc"
-          mkdir -p "$RUNNER_TEMP/vlc" source/app/libs
-          gh release download "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/vlc" --pattern "libvlc-all-3.7.5.aar"
-          cp "$RUNNER_TEMP/vlc/libvlc-all-3.7.5.aar" source/app/libs/libvlc-all-3.7.5.aar
+          mkdir -p source-assets source/app/libs
+          gh release download "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir source-assets --pattern "libvlc-all-3.7.5.aar"
+          test -s source-assets/libvlc-all-3.7.5.aar
+          cp source-assets/libvlc-all-3.7.5.aar source/app/libs/
 
-      - name: Patch Universal source and version
+      - name: Apply verified subtitle source and Universal version
         run: |
           set -euo pipefail
           python3 source/scripts/apply-vertical-subtitle-patch.py source
           python3 - <<'PY'
+          import os
           from pathlib import Path
+          import re
 
           path = Path("source/app/build.gradle.kts")
           text = path.read_text(encoding="utf-8")
-          replacements = [
-              ("versionCode = 13", "versionCode = 14"),
-              ('versionName = "1.0.12"', 'versionName = "1.0.13"'),
-          ]
-          for before, after in replacements:
-              if after in text and before not in text:
-                  continue
-              count = text.count(before)
-              if count != 1:
-                  raise SystemExit(f"{path}: expected one {before!r}, got {count}")
-              text = text.replace(before, after, 1)
+          for pattern, replacement in (
+              (r'(?m)^(\s*versionCode\s*=\s*)\d+', rf'\g<1>{os.environ["UNIVERSAL_VERSION_CODE"]}'),
+              (r'(?m)^(\s*versionName\s*=\s*)"[^"]+"', rf'\g<1>"{os.environ["UNIVERSAL_VERSION"]}"'),
+          ):
+              text, count = re.subn(pattern, replacement, text)
+              assert count == 1, f"Expected one version field: {pattern}"
+          assert 'applicationId = "io.mirr.plexplay.universal"' in text
           path.write_text(text, encoding="utf-8")
           PY
-          cat > source/RELEASE_NOTES_v1.0.13.md <<'EOF'
-          # Plex Play Universal v1.0.13
+          test -s source/RELEASE_NOTES_v1.0.14.md
 
-          - 세로 자막의 ASCII 영문 한 글자는 세운 상태로 유지합니다.
-          - 연속된 ASCII 영문 두 글자 이상은 단어 단위로 오른쪽 90도 회전합니다.
-          - 회전 단어의 실제 폭과 중심을 계산해 앞뒤 글자 겹침을 방지합니다.
-          - Media3 원본 재생과 VLC 범용 재생에 동일하게 적용합니다.
-          - 자동 테스트, APK 정렬, 패키지/버전, 고정 서명 인증서, SHA-256 검증을 통과한 빌드입니다.
-          EOF
-
-      - name: Prepare exact Plex Play main source
+      - name: Reconstruct main app and apply the same subtitle release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          rm -rf main-build
-          rsync -a --exclude '.git' --exclude '.github' --exclude '.gradle' --exclude 'build' source/ main-build/
+          test -s source/scripts/prepare-main-overlay.sh
+          mkdir -p main-build
+          rsync -a --exclude='.git/' --exclude='.github/' --exclude='.gradle/' \
+            --exclude='build/' source/ main-build/
           bash source/scripts/prepare-main-overlay.sh main-build
-          test "$(sha256sum main-build/app/src/main/res/drawable-nodpi/ic_launcher_cyber.png | awk '{print $1}')" = 5b81034a4951a561ba3c11201b7972dd6e4b18c9c76ca0f7f46bd7758c280d48
-          test "$(sha256sum main-build/app/src/main/res/drawable-nodpi/tv_banner.png | awk '{print $1}')" = f8bede13fd2884d62279a983d4d583624befcd61818d9757a0b640c7bd035fc6
-
           cp source/app/build.gradle.kts main-build/app/build.gradle.kts
           python3 - <<'PY'
+          import os
           from pathlib import Path
+          import re
 
           path = Path("main-build/app/build.gradle.kts")
           text = path.read_text(encoding="utf-8")
-          replacements = [
-              ('applicationId = "io.mirr.plexplay.universal"', 'applicationId = "io.mirr.plexplay"'),
-              ("versionCode = 14", "versionCode = 178"),
-              ('versionName = "1.0.13"', 'versionName = "3.19.26"'),
-          ]
-          for before, after in replacements:
-              count = text.count(before)
-              if count != 1:
-                  raise SystemExit(f"{path}: expected one {before!r}, got {count}")
-              text = text.replace(before, after, 1)
-          for removable in [
-              "        jniLibs.useLegacyPackaging = true",
-              '    implementation(files("libs/libvlc-all-3.7.5.aar"))',
-          ]:
-              count = text.count(removable)
-              if count != 1:
-                  raise SystemExit(f"{path}: expected one removable entry {removable!r}, got {count}")
-              text = text.replace(removable, "", 1)
+          replacements = (
+              (r'(?m)^(\s*applicationId\s*=\s*)"io\.mirr\.plexplay\.universal"', r'\g<1>"io.mirr.plexplay"'),
+              (r'(?m)^(\s*versionCode\s*=\s*)\d+', rf'\g<1>{os.environ["MAIN_VERSION_CODE"]}'),
+              (r'(?m)^(\s*versionName\s*=\s*)"[^"]+"', rf'\g<1>"{os.environ["MAIN_VERSION"]}"'),
+              (r'(?m)^\s*jniLibs\.useLegacyPackaging\s*=\s*true\s*\n', ""),
+              (r'(?m)^\s*implementation\(files\("libs/libvlc-all-3\.7\.5\.aar"\)\)\s*\n', ""),
+          )
+          for pattern, replacement in replacements:
+              text, count = re.subn(pattern, replacement, text)
+              assert count == 1, f"Expected one main-app field: {pattern}"
+          assert "libvlc" not in text.lower()
           path.write_text(text, encoding="utf-8")
           PY
           rm -rf main-build/app/libs
           python3 source/scripts/apply-vertical-subtitle-patch.py main-build
-          grep -q 'plexReleaseSigningReady' main-build/app/build.gradle.kts
-          grep -q 'applicationId = "io.mirr.plexplay"' main-build/app/build.gradle.kts
-          ! grep -q 'libvlc-all' main-build/app/build.gradle.kts
-
-          cat > main-build/RELEASE_NOTES_v3.19.26.md <<'EOF'
-          # Plex Play v3.19.26
-
-          - 세로 자막의 ASCII 영문 한 글자는 세운 상태로 유지합니다.
-          - 연속된 ASCII 영문 두 글자 이상은 단어 단위로 오른쪽 90도 회전합니다.
-          - 회전 단어의 실제 폭과 중심을 계산해 앞뒤 글자 겹침을 방지합니다.
-          - v3.19.25의 자막 중복 방지 및 품질 변환 동작을 그대로 유지합니다.
-          - 자동 테스트, APK 정렬, 패키지/버전, 고정 서명 인증서, SHA-256 검증을 통과한 빌드입니다.
-          EOF
+          test -s main-build/RELEASE_NOTES_v3.19.27.md
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -163,105 +141,113 @@ jobs:
       - name: Test and build Universal
         working-directory: source
         run: |
-          set -euo pipefail
           chmod +x gradlew
           ./gradlew --no-daemon testDebugUnitTest assembleRelease --stacktrace --console=plain
 
-      - name: Test and build Plex Play main
+      - name: Test and build main app
         working-directory: main-build
         run: |
-          set -euo pipefail
           chmod +x gradlew
           ./gradlew --no-daemon testDebugUnitTest assembleRelease --stacktrace --console=plain
 
-      - name: Stage and verify both APKs
+      - name: Verify both APKs before publishing
         run: |
           set -euo pipefail
-          mkdir -p dist/universal dist/main
-          cp source/app/build/outputs/apk/release/app-release.apk dist/universal/PlexPlayUniversal.apk
-          cp main-build/app/build/outputs/apk/release/app-release.apk dist/main/PlexPlay.apk
-          (
-            cd dist/universal
-            sha256sum PlexPlayUniversal.apk > PlexPlayUniversal.apk.sha256
-            sha256sum -c PlexPlayUniversal.apk.sha256
-          )
-          (
-            cd dist/main
-            sha256sum PlexPlay.apk > PlexPlay.apk.sha256
-            sha256sum -c PlexPlay.apk.sha256
-          )
-
-          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
-          AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt"
-          ZIPALIGN="$ANDROID_HOME/build-tools/36.0.0/zipalign"
-
+          tools_dir="$ANDROID_HOME/build-tools/36.0.0"
           verify_apk() {
-            local apk="$1"
-            local package_name="$2"
-            local version_code="$3"
-            local version_name="$4"
-            local badging="$apk.badging"
-
-            "$ZIPALIGN" -c -v 4 "$apk"
-            local cert
-            cert="$("$APKSIGNER" verify --verbose --print-certs "$apk" | tee /dev/stderr | awk -F': ' '/Signer #1 certificate SHA-256 digest:/{print $2; exit}' | tr -d ':' | tr '[:upper:]' '[:lower:]')"
-            test "$cert" = "$EXPECTED_CERT_SHA256"
-            "$AAPT" dump badging "$apk" | tee "$badging"
-            grep -F "package: name='$package_name' versionCode='$version_code' versionName='$version_name'" "$badging"
+            local project="$1" package="$2" code="$3" version="$4" asset="$5"
+            cp "$project/app/build/outputs/apk/release/app-release.apk" "$project/$asset"
+            "$tools_dir/apksigner" verify --verbose --print-certs "$project/$asset" \
+              > "$project/apk-signature.txt"
+            grep -Fx "Signer #1 certificate SHA-256 digest: $EXPECTED_CERT_SHA256" \
+              "$project/apk-signature.txt"
+            "$tools_dir/zipalign" -c -P 16 -v 4 "$project/$asset" > "$project/apk-alignment.txt"
+            "$tools_dir/aapt" dump badging "$project/$asset" > "$project/apk-badging.txt"
+            grep -F "package: name='$package' versionCode='$code' versionName='$version'" \
+              "$project/apk-badging.txt"
+            (cd "$project" && sha256sum "$asset" > "$asset.sha256" && sha256sum -c "$asset.sha256")
           }
+          verify_apk source io.mirr.plexplay.universal \
+            "$UNIVERSAL_VERSION_CODE" "$UNIVERSAL_VERSION" PlexPlayUniversal.apk
+          verify_apk main-build io.mirr.plexplay \
+            "$MAIN_VERSION_CODE" "$MAIN_VERSION" PlexPlay.apk
 
-          verify_apk dist/universal/PlexPlayUniversal.apk io.mirr.plexplay.universal "$UNIVERSAL_VERSION_CODE" "$UNIVERSAL_VERSION"
-          verify_apk dist/main/PlexPlay.apk io.mirr.plexplay "$MAIN_VERSION_CODE" "$MAIN_VERSION"
+      - name: Upload APKs, verification records, and test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlexPlay-v3.19.27-and-Universal-v1.0.14
+          if-no-files-found: warn
+          path: |
+            source/PlexPlayUniversal.apk
+            source/PlexPlayUniversal.apk.sha256
+            source/apk-*.txt
+            source/app/build/test-results/testDebugUnitTest/
+            source/app/build/reports/tests/testDebugUnitTest/
+            main-build/PlexPlay.apk
+            main-build/PlexPlay.apk.sha256
+            main-build/apk-*.txt
+            main-build/app/build/test-results/testDebugUnitTest/
+            main-build/app/build/reports/tests/testDebugUnitTest/
 
-      - name: Persist verified Universal source
+      - name: Commit only verified release source files
+        id: release_source
         working-directory: source
         run: |
           set -euo pipefail
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add app/build.gradle.kts
-          git add app/src/main/java/io/mirr/plexplay/ui/PlayerScreen.kt
-          git add app/src/test/java/io/mirr/plexplay/ui/VerticalSubtitleTypographyTest.kt
-          git add RELEASE_NOTES_v1.0.13.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- \
+            app/build.gradle.kts \
+            app/src/main/java/io/mirr/plexplay/ui/PlayerScreen.kt \
+            app/src/main/java/io/mirr/plexplay/ui/VlcPlayerScreen.kt \
+            app/src/main/java/io/mirr/plexplay/ui/SubtitlePositionSettings.kt \
+            app/src/main/java/io/mirr/plexplay/ui/SubtitlePositionPreferences.kt \
+            app/src/main/java/io/mirr/plexplay/ui/VerticalSubtitleTypography.kt \
+            app/src/test/java/io/mirr/plexplay/ui/VerticalSubtitleBracketTest.kt \
+            app/src/test/java/io/mirr/plexplay/ui/VerticalSubtitleTypographyTest.kt \
+            USER_GUIDE.md \
+            RELEASE_NOTES_v1.0.14.md
           if ! git diff --cached --quiet; then
-            git commit -m "Rotate multi-letter English in vertical subtitles"
+            git commit -m "Match Plezy vertical subtitle settings in v1.0.14"
             git push origin HEAD:main
           fi
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Upload verified build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: signed-vertical-English-releases
-          path: |
-            dist/universal/PlexPlayUniversal.apk
-            dist/universal/PlexPlayUniversal.apk.sha256
-            dist/main/PlexPlay.apk
-            dist/main/PlexPlay.apk.sha256
-            source/app/build/test-results/testDebugUnitTest/
-            main-build/app/build/test-results/testDebugUnitTest/
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Publish temporary main prerelease
+      - name: Publish verified main-app transfer prerelease
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ steps.release_source.outputs.commit }}
         run: |
           set -euo pipefail
-          if gh release view "$MAIN_TEMP_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$MAIN_TEMP_TAG" dist/main/PlexPlay.apk dist/main/PlexPlay.apk.sha256 --repo "$GITHUB_REPOSITORY" --clobber
-            gh release edit "$MAIN_TEMP_TAG" --repo "$GITHUB_REPOSITORY" --title "Plex Play v$MAIN_VERSION verified transfer build" --notes-file main-build/RELEASE_NOTES_v3.19.26.md --prerelease
+          if gh release view "$MAIN_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$MAIN_TAG" main-build/PlexPlay.apk main-build/PlexPlay.apk.sha256 \
+              --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$MAIN_TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "Plex Play v$MAIN_VERSION verified build" \
+              --notes-file main-build/RELEASE_NOTES_v3.19.27.md --draft=false --prerelease --latest=false
           else
-            gh release create "$MAIN_TEMP_TAG" dist/main/PlexPlay.apk dist/main/PlexPlay.apk.sha256 --repo "$GITHUB_REPOSITORY" --title "Plex Play v$MAIN_VERSION verified transfer build" --notes-file main-build/RELEASE_NOTES_v3.19.26.md --prerelease
+            gh release create "$MAIN_TAG" main-build/PlexPlay.apk main-build/PlexPlay.apk.sha256 \
+              --repo "$GITHUB_REPOSITORY" --target "$RELEASE_COMMIT" \
+              --title "Plex Play v$MAIN_VERSION verified build" \
+              --notes-file main-build/RELEASE_NOTES_v3.19.27.md --prerelease --latest=false
           fi
 
-      - name: Publish Universal latest release
+      - name: Publish verified Universal release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ steps.release_source.outputs.commit }}
         run: |
           set -euo pipefail
           if gh release view "$UNIVERSAL_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$UNIVERSAL_TAG" dist/universal/PlexPlayUniversal.apk dist/universal/PlexPlayUniversal.apk.sha256 --repo "$GITHUB_REPOSITORY" --clobber
-            gh release edit "$UNIVERSAL_TAG" --repo "$GITHUB_REPOSITORY" --title "Plex Play Universal v$UNIVERSAL_VERSION" --notes-file source/RELEASE_NOTES_v1.0.13.md --latest
+            gh release upload "$UNIVERSAL_TAG" source/PlexPlayUniversal.apk source/PlexPlayUniversal.apk.sha256 \
+              --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$UNIVERSAL_TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "Plex Play Universal v$UNIVERSAL_VERSION" \
+              --notes-file source/RELEASE_NOTES_v1.0.14.md --draft=false --prerelease=false --latest
           else
-            gh release create "$UNIVERSAL_TAG" dist/universal/PlexPlayUniversal.apk dist/universal/PlexPlayUniversal.apk.sha256 --repo "$GITHUB_REPOSITORY" --title "Plex Play Universal v$UNIVERSAL_VERSION" --notes-file source/RELEASE_NOTES_v1.0.13.md --latest
+            gh release create "$UNIVERSAL_TAG" source/PlexPlayUniversal.apk source/PlexPlayUniversal.apk.sha256 \
+              --repo "$GITHUB_REPOSITORY" --target "$RELEASE_COMMIT" \
+              --title "Plex Play Universal v$UNIVERSAL_VERSION" \
+              --notes-file source/RELEASE_NOTES_v1.0.14.md --latest
           fi
