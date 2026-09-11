@@ -132,6 +132,7 @@ private enum class VlcSettingsPage(
     MAIN("재생 설정"),
     SUBTITLE("자막 설정"),
     SUBTITLE_STYLE("자막 사용자 설정"),
+    SUBTITLE_POSITION("자막 위치 · 세로쓰기"),
     SPEED("재생 속도"),
     DISPLAY("화면 설정"),
     DISPLAY_ADVANCED("고급 화면 설정"),
@@ -546,9 +547,21 @@ fun VlcPlayerScreen(
 
     fun applySubtitleStyleChange(updated: VlcSubtitleStyle) {
         if (updated == subtitleStyle && updated == draftSubtitleStyle) return
-        draftSubtitleStyle = updated
-        subtitleStyle = updated
-        preferences.saveVlcSubtitleStyle(updated)
+        val position = preferences.resolveSubtitlePositionChange(
+            previousVertical = subtitleStyle.verticalWriting,
+            nextVertical = updated.verticalWriting,
+            previousX = subtitleStyle.horizontalOffsetPercent,
+            previousY = subtitleStyle.verticalOffsetPercent,
+            nextX = updated.horizontalOffsetPercent,
+            nextY = updated.verticalOffsetPercent,
+        )
+        val resolved = updated.copy(
+            horizontalOffsetPercent = position.first,
+            verticalOffsetPercent = position.second,
+        )
+        draftSubtitleStyle = resolved
+        subtitleStyle = resolved
+        preferences.saveVlcSubtitleStyle(resolved)
         // The app-side text overlay is recomposed from subtitleStyle, so it is
         // already updated without touching playback. Native VLC subtitle
         // options require a new renderer; request a debounced restart instead
@@ -624,6 +637,9 @@ fun VlcPlayerScreen(
             }
             settingsPage == VlcSettingsPage.SUBTITLE_STYLE -> {
                 settingsPage = VlcSettingsPage.SUBTITLE
+            }
+            settingsPage == VlcSettingsPage.SUBTITLE_POSITION -> {
+                settingsPage = VlcSettingsPage.SUBTITLE_STYLE
             }
             settingsPage != VlcSettingsPage.MAIN -> {
                 settingsPage = VlcSettingsPage.MAIN
@@ -1982,9 +1998,6 @@ private fun VlcSettingsDialog(
     onClearCache: () -> Unit,
     onNavigateBack: () -> Unit,
 ) {
-    val subtitleHorizontalFocusRequester = remember { FocusRequester() }
-    val subtitleVerticalFocusRequester = remember { FocusRequester() }
-    val subtitlePositionResetFocusRequester = remember { FocusRequester() }
     val advancedDisplayFocusRequesters = remember { List(6) { FocusRequester() } }
 
     AlertDialog(
@@ -2229,68 +2242,36 @@ private fun VlcSettingsDialog(
                                 )
                             }
                         }
-                        SettingsTitle("자막 위치")
-                        VlcValueSlider(
-                            label = "가로",
-                            value = draftStyle.horizontalOffsetPercent.toFloat(),
-                            range = -100f..100f,
-                            focusRequester = subtitleHorizontalFocusRequester,
-                            down = subtitleVerticalFocusRequester,
-                            onValueChange = {
-                                onDraftStyleChanged(
-                                    draftStyle.copy(horizontalOffsetPercent = it.roundToInt()),
-                                )
-                            },
-                        )
-                        VlcValueSlider(
-                            label = "세로",
-                            value = draftStyle.verticalOffsetPercent.toFloat(),
-                            range = -100f..100f,
-                            focusRequester = subtitleVerticalFocusRequester,
-                            up = subtitleHorizontalFocusRequester,
-                            down = subtitlePositionResetFocusRequester,
-                            onValueChange = {
-                                onDraftStyleChanged(
-                                    draftStyle.copy(verticalOffsetPercent = it.roundToInt()),
-                                )
-                            },
-                        )
-                        VlcActionButton(
-                            label = "자막 위치 가운데",
-                            modifier = Modifier.focusRequester(subtitlePositionResetFocusRequester),
-                            onClick = {
-                                onDraftStyleChanged(
-                                    draftStyle.copy(
-                                        horizontalOffsetPercent = 0,
-                                        verticalOffsetPercent = 0,
-                                    ),
-                                )
-                            },
-                        )
-                        Text(
-                            "리모컨 좌우: 위치 조절 · 위아래: 항목 이동",
-                            color = Color(0xFFFFD54F),
-                            fontWeight = FontWeight.Bold,
-                        )
-                        SettingsTitle("쓰기 방향")
                         VlcSelectionRow(
-                            label = "가로쓰기",
-                            selected = !draftStyle.verticalWriting,
-                            onClick = {
-                                onDraftStyleChanged(draftStyle.copy(verticalWriting = false))
-                            },
-                        )
-                        VlcSelectionRow(
-                            label = "세로쓰기",
-                            selected = draftStyle.verticalWriting,
-                            onClick = {
-                                onDraftStyleChanged(draftStyle.copy(verticalWriting = true))
-                            },
+                            label = "자막 위치 · X ${draftStyle.horizontalOffsetPercent}% / " +
+                                "Y ${draftStyle.verticalOffsetPercent}% · " +
+                                "세로쓰기 ${if (draftStyle.verticalWriting) "켬" else "끔"}",
+                            selected = false,
+                            onClick = { onPageChanged(VlcSettingsPage.SUBTITLE_POSITION) },
                         )
                         VlcActionButton(
                             label = "완료",
                             onClick = onApplyStyle,
                             primary = true,
+                        )
+                    }
+
+                    VlcSettingsPage.SUBTITLE_POSITION -> {
+                        SubtitlePositionSettings(
+                            horizontalOffset = draftStyle.horizontalOffsetPercent,
+                            verticalOffset = draftStyle.verticalOffsetPercent,
+                            verticalWriting = draftStyle.verticalWriting,
+                            onPositionChanged = { x, y ->
+                                onDraftStyleChanged(
+                                    draftStyle.copy(
+                                        horizontalOffsetPercent = x,
+                                        verticalOffsetPercent = y,
+                                    ),
+                                )
+                            },
+                            onVerticalWritingChanged = { enabled ->
+                                onDraftStyleChanged(draftStyle.copy(verticalWriting = enabled))
+                            },
                         )
                     }
 
@@ -2810,7 +2791,7 @@ private fun android.content.SharedPreferences.loadVlcSubtitleStyle(): VlcSubtitl
             getInt("subtitle_edge_type", CaptionStyleCompat.EDGE_TYPE_OUTLINE),
         ),
         horizontalOffsetPercent = getInt("subtitle_horizontal_offset", 0).coerceIn(-100, 100),
-        verticalOffsetPercent = getInt("subtitle_vertical_offset", 0),
+        verticalOffsetPercent = getInt("subtitle_vertical_offset", 0).coerceIn(-100, 100),
         verticalWriting = getBoolean("subtitle_vertical_writing", false),
     )
 

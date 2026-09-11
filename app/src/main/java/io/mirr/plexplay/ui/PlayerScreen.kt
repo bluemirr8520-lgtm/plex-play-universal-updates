@@ -173,6 +173,7 @@ private enum class PlayerSettingsPage(
 ) {
     MAIN("재생 설정"),
     SUBTITLE("자막 설정"),
+    SUBTITLE_POSITION("자막 위치·세로쓰기"),
     SPEED("재생 속도"),
     DISPLAY("화면 설정"),
     DISPLAY_ADVANCED("고급 화면 설정"),
@@ -519,17 +520,6 @@ internal data class SubtitleAppearance(
     val edgeColor: Int = android.graphics.Color.BLACK,
 )
 
-internal data class VerticalSubtitleGlyph(
-    val text: String,
-    val rotate: Boolean = false,
-    val spacer: Boolean = false,
-    val advanceScale: Float = 1f,
-    val centerInCell: Boolean = false,
-    val measureRotatedTextAdvance: Boolean = false,
-)
-
-internal const val VerticalSubtitleRightRotationDegrees = 90f
-
 private data class VideoScreenSettings(
     val brightness: Float = 100f,
     val pictureMode: PictureMode = PictureMode.STANDARD,
@@ -584,7 +574,6 @@ private val PlayerMenuFocusBackground = Color(0xFF053A46)
 private val PlayerMenuSelectedBackground = Color(0xFF12404A)
 private val PlayerMenuIdleBorder = Color(0x66FFFFFF)
 private const val SubtitleLineSpacingMultiplier = 1.24f
-private const val VerticalSubtitleWordSpacing = .22f
 
 private fun normalizeStoredScreenBrightness(
     storedBrightness: Float,
@@ -949,7 +938,19 @@ fun PlayerScreen(
         }
     }
 
-    fun updateSubtitleAppearance(value: SubtitleAppearance) {
+    fun updateSubtitleAppearance(requested: SubtitleAppearance) {
+        val position = playerPreferences.resolveSubtitlePositionChange(
+            previousVertical = subtitleAppearance.verticalWriting,
+            nextVertical = requested.verticalWriting,
+            previousX = subtitleAppearance.horizontalOffsetPercent,
+            previousY = subtitleAppearance.verticalOffsetPercent,
+            nextX = requested.horizontalOffsetPercent,
+            nextY = requested.verticalOffsetPercent,
+        )
+        val value = requested.copy(
+            horizontalOffsetPercent = position.first,
+            verticalOffsetPercent = position.second,
+        )
         subtitleAppearance = value
         playerPreferences.edit()
             .putInt("subtitle_size", value.sizePercent)
@@ -1536,6 +1537,8 @@ fun PlayerScreen(
     fun closeOrStepBackPlayerSettings() {
         when (playerSettingsPage) {
             PlayerSettingsPage.MAIN -> playerSettingsVisible = false
+            PlayerSettingsPage.SUBTITLE_POSITION ->
+                playerSettingsPage = PlayerSettingsPage.SUBTITLE
             PlayerSettingsPage.DISPLAY_ADVANCED ->
                 playerSettingsPage = PlayerSettingsPage.DISPLAY
             else -> playerSettingsPage = PlayerSettingsPage.MAIN
@@ -2390,7 +2393,8 @@ fun PlayerScreen(
                             PlayerSettingsPage.entries
                                 .filter {
                                     it != PlayerSettingsPage.MAIN &&
-                                        it != PlayerSettingsPage.DISPLAY_ADVANCED
+                                        it != PlayerSettingsPage.DISPLAY_ADVANCED &&
+                                        it != PlayerSettingsPage.SUBTITLE_POSITION
                                 }
                                 .forEach { page ->
                                     SettingsMenuButton(
@@ -2442,6 +2446,9 @@ fun PlayerScreen(
                                 },
                                 appearance = subtitleAppearance,
                                 onAppearanceChanged = ::updateSubtitleAppearance,
+                                onPositionSettingsRequested = {
+                                    playerSettingsPage = PlayerSettingsPage.SUBTITLE_POSITION
+                                },
                                 onManualSubtitleIndexChanged = {
                                     manualSubtitleIndex = it
                                     manualSubtitleText = ""
@@ -2450,6 +2457,22 @@ fun PlayerScreen(
                                     playerSubtitleText = ""
                                     useNativeSubtitleRenderer = false
                                     tracksRevision++
+                                },
+                            )
+                        }
+                        PlayerSettingsPage.SUBTITLE_POSITION -> {
+                            SubtitlePositionSettings(
+                                horizontalOffset = subtitleAppearance.horizontalOffsetPercent,
+                                verticalOffset = subtitleAppearance.verticalOffsetPercent,
+                                verticalWriting = subtitleAppearance.verticalWriting,
+                                onPositionChanged = { x, y ->
+                                    updateSubtitleAppearance(subtitleAppearance.copy(
+                                        horizontalOffsetPercent = x,
+                                        verticalOffsetPercent = y,
+                                    ))
+                                },
+                                onVerticalWritingChanged = { enabled ->
+                                    updateSubtitleAppearance(subtitleAppearance.copy(verticalWriting = enabled))
                                 },
                             )
                         }
@@ -3700,15 +3723,10 @@ private fun SubtitleSettings(
     onPickCustomFont: () -> Unit,
     appearance: SubtitleAppearance,
     onAppearanceChanged: (SubtitleAppearance) -> Unit,
+    onPositionSettingsRequested: () -> Unit,
     onManualSubtitleIndexChanged: (Int?) -> Unit,
     onTracksChanged: () -> Unit,
 ) {
-    val horizontalPositionFocusRequester = remember { FocusRequester() }
-    val verticalPositionFocusRequester = remember { FocusRequester() }
-    val resetPositionFocusRequester = remember { FocusRequester() }
-    val verticalWritingFocusRequester = remember { FocusRequester() }
-    var horizontalPositionFocused by remember { mutableStateOf(false) }
-    var verticalPositionFocused by remember { mutableStateOf(false) }
     val textTrackDisabled =
         C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes
     val hasTextOverride =
@@ -3912,134 +3930,15 @@ private fun SubtitleSettings(
         },
     )
 
-    Text("자막 위치")
-    Text(
-        text = "가로 ${formatSubtitleOffset(appearance.horizontalOffsetPercent)}",
-        color = Color.White,
-    )
-    Slider(
-        value = appearance.horizontalOffsetPercent.toFloat(),
-        onValueChange = {
-            onAppearanceChanged(
-                appearance.copy(horizontalOffsetPercent = it.roundToInt()),
-            )
-        },
-        modifier = Modifier
-            .fillMaxWidth()
-            .focusRequester(horizontalPositionFocusRequester)
-            .onFocusChanged {
-                horizontalPositionFocused = it.isFocused || it.hasFocus
-            }
-            .onPreviewKeyEvent {
-                handleDpadFocusMove(
-                    it.nativeKeyEvent,
-                    down = verticalPositionFocusRequester,
-                )
-            },
-        colors = playerSettingsSliderColors(horizontalPositionFocused),
-        valueRange = -100f..100f,
-        steps = 39,
+    SettingsMenuButton(
+        label = "자막 위치·세로쓰기",
+        onClick = onPositionSettingsRequested,
     )
     Text(
-        text = "세로 ${formatSubtitleOffset(appearance.verticalOffsetPercent)}",
-        color = Color.White,
-    )
-    Slider(
-        value = appearance.verticalOffsetPercent.toFloat(),
-        onValueChange = {
-            onAppearanceChanged(
-                appearance.copy(verticalOffsetPercent = it.roundToInt()),
-            )
-        },
-        modifier = Modifier
-            .fillMaxWidth()
-            .focusRequester(verticalPositionFocusRequester)
-            .onFocusChanged {
-                verticalPositionFocused = it.isFocused || it.hasFocus
-            }
-            .onPreviewKeyEvent {
-                handleDpadFocusMove(
-                    it.nativeKeyEvent,
-                    up = horizontalPositionFocusRequester,
-                    down = resetPositionFocusRequester,
-                )
-            },
-        colors = playerSettingsSliderColors(verticalPositionFocused),
-        valueRange = -100f..100f,
-        steps = 39,
-    )
-    Text(
-        text = "가로는 - 왼쪽 / + 오른쪽, 세로는 - 위 / + 아래로 이동합니다.",
-        color = Color.Gray,
-    )
-    Text(
-        text = "가로 자막 위치는 하단 중앙 위쪽, 탐색은 화면 맨 아래에서 조절합니다.",
-        color = Color.Gray,
-    )
-    Text(
-        text = "세로 자막 위치는 오른쪽 안쪽, 볼륨은 맨 오른쪽 가장자리, 밝기는 맨 왼쪽 가장자리에서 조절합니다.",
-        color = Color.Gray,
-    )
-    PlayerMenuActionButton(
-        label = "자막 위치 가운데로",
-        onClick = {
-            onAppearanceChanged(
-                appearance.copy(
-                    horizontalOffsetPercent = 0,
-                    verticalOffsetPercent = 0,
-                ),
-            )
-        },
-        modifier = Modifier
-            .fillMaxWidth()
-            .focusRequester(resetPositionFocusRequester)
-            .onPreviewKeyEvent {
-                handleDpadFocusMove(
-                    it.nativeKeyEvent,
-                    up = verticalPositionFocusRequester,
-                    down = verticalWritingFocusRequester,
-                )
-            },
-    )
-
-    Text("자막 세로쓰기")
-    AudioOptionRow(
-        label = if (appearance.verticalWriting) {
-            "세로쓰기: 켬"
-        } else {
-            "세로쓰기: 끔"
-        },
-        selected = appearance.verticalWriting,
-        modifier = Modifier
-            .focusRequester(verticalWritingFocusRequester)
-            .onPreviewKeyEvent {
-                handleDpadFocusMove(
-                    it.nativeKeyEvent,
-                    up = resetPositionFocusRequester,
-                )
-            },
-        onClick = {
-            val enabled = !appearance.verticalWriting
-            onAppearanceChanged(
-                appearance.copy(
-                    verticalWriting = enabled,
-                    horizontalOffsetPercent = if (enabled) {
-                        0
-                    } else {
-                        appearance.horizontalOffsetPercent
-                    },
-                    verticalOffsetPercent = if (enabled) {
-                        0
-                    } else {
-                        appearance.verticalOffsetPercent
-                    },
-                ),
-            )
-        },
-    )
-    Text(
-        text = "세로쓰기는 어절 단위로 줄바꿈하고 문장부호를 세로쓰기용으로 표시합니다.",
-        color = Color.Gray,
+        text = "가로 ${formatSubtitleOffset(appearance.horizontalOffsetPercent)} · " +
+            "세로 ${formatSubtitleOffset(appearance.verticalOffsetPercent)} · " +
+            if (appearance.verticalWriting) "세로쓰기 켬" else "세로쓰기 끔",
+        color = Color.LightGray,
     )
 
     Text("자막 색상")
@@ -4258,7 +4157,7 @@ internal fun VerticalSubtitleOverlay(
                 appearance.horizontalOffsetPercent
             view.verticalOffsetPercent =
                 appearance.verticalOffsetPercent
-            view.setBackgroundColor(appearance.backgroundColor)
+            view.subtitleBackgroundColor = appearance.backgroundColor
             view.setPadding(
                 (34 * density).roundToInt(),
                 (18 * density).roundToInt(),
@@ -4417,6 +4316,7 @@ private class VerticalSubtitleView(context: Context) : View(context) {
             invalidate()
         }
     var subtitleFillColor: Int = android.graphics.Color.WHITE
+    var subtitleBackgroundColor: Int = android.graphics.Color.TRANSPARENT
     var subtitleEdgeType: Int = CaptionStyleCompat.EDGE_TYPE_OUTLINE
     var subtitleEdgeColor: Int = android.graphics.Color.BLACK
     var outlineStrokeWidth: Float = 4f
@@ -4453,6 +4353,7 @@ private class VerticalSubtitleView(context: Context) : View(context) {
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val edgePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val glyphBounds = Rect()
+    private val backgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
     init {
         setWillNotDraw(false)
@@ -4468,21 +4369,7 @@ private class VerticalSubtitleView(context: Context) : View(context) {
             }
             ?: Int.MAX_VALUE
         val maxColumnAdvance = maxVerticalColumnAdvance(availableHeight)
-        val measuredSourceColumns = sourceColumns.map { glyphs ->
-            glyphs.map { glyph ->
-                if (!glyph.measureRotatedTextAdvance) {
-                    glyph
-                } else {
-                    glyph.copy(
-                        advanceScale = (
-                            (fillPaint.measureText(glyph.text) + outlineStrokeWidth * 2f) /
-                                glyphAdvancePx
-                            ).coerceAtLeast(1f),
-                    )
-                }
-            }
-        }
-        val columns = measuredSourceColumns.wrapVerticalSubtitleColumns(maxColumnAdvance)
+        val columns = sourceColumns.wrapVerticalSubtitleColumns(maxColumnAdvance)
         measuredColumns = columns
         val columnCount = columns.size.coerceAtLeast(1)
         val measuredColumnAdvance = columns.maxOfOrNull { it.verticalAdvance() } ?: 1f
@@ -4519,6 +4406,15 @@ private class VerticalSubtitleView(context: Context) : View(context) {
             val top = availableTop +
                 (availableHeight - contentHeight) / 2f +
                 offsetY
+            if (android.graphics.Color.alpha(subtitleBackgroundColor) > 0 && contentHeight > 0f) {
+                backgroundPaint.color = subtitleBackgroundColor
+                val halfWidth = columnWidth * .46f
+                val radius = outlineStrokeWidth.coerceAtLeast(1f) * 1.25f
+                canvas.drawRoundRect(
+                    x - halfWidth, top, x + halfWidth, top + contentHeight,
+                    radius, radius, backgroundPaint,
+                )
+            }
             var baseline = top -
                 ((fillPaint.ascent() + fillPaint.descent()) / 2f)
             glyphs.forEach { glyph ->
@@ -4536,12 +4432,7 @@ private class VerticalSubtitleView(context: Context) : View(context) {
         x: Float,
         baseline: Float,
     ) {
-        val baseCellCenterY = baseline + (fillPaint.ascent() + fillPaint.descent()) / 2f
-        val cellCenterY = if (glyph.measureRotatedTextAdvance) {
-            baseCellCenterY + glyphAdvancePx * (glyph.advanceScale - 1f) / 2f
-        } else {
-            baseCellCenterY
-        }
+        val cellCenterY = baseline + (fillPaint.ascent() + fillPaint.descent()) / 2f
         val drawPosition = if (glyph.centerInCell) {
             centeredGlyphPosition(glyph.text, x, cellCenterY)
         } else {
@@ -4557,7 +4448,7 @@ private class VerticalSubtitleView(context: Context) : View(context) {
         }
         if (glyph.rotate) {
             canvas.save()
-            canvas.rotate(VerticalSubtitleRightRotationDegrees, x, cellCenterY)
+            canvas.rotate(90f, x, cellCenterY)
         }
         if (subtitleEdgeType == CaptionStyleCompat.EDGE_TYPE_OUTLINE) {
             canvas.drawText(glyph.text, drawX, drawBaseline, edgePaint)
@@ -4676,323 +4567,6 @@ private fun String.wrapHorizontalSubtitleLine(
     current.trim().takeIf { it.isNotBlank() }?.let { lines += it }
     return lines
 }
-
-private fun String.toVerticalSubtitleColumns(): List<List<VerticalSubtitleGlyph>> {
-    val lines = lineSequence()
-        .map { it.trimEnd() }
-        .filter { it.isNotBlank() }
-        .toList()
-    return lines
-        .map { it.toVerticalSubtitleGlyphs() }
-        .filter { it.isNotEmpty() }
-}
-
-private fun List<List<VerticalSubtitleGlyph>>.wrapVerticalSubtitleColumns(
-    maxColumnAdvance: Float,
-): List<List<VerticalSubtitleGlyph>> =
-    flatMap { glyphs -> glyphs.wrapVerticalSubtitleColumn(maxColumnAdvance) }
-
-private fun List<VerticalSubtitleGlyph>.wrapVerticalSubtitleColumn(
-    maxColumnAdvance: Float,
-): List<List<VerticalSubtitleGlyph>> {
-    if (isEmpty()) return emptyList()
-    val safeMaxAdvance = maxColumnAdvance.coerceAtLeast(4f)
-    val columns = mutableListOf<List<VerticalSubtitleGlyph>>()
-    val words = toVerticalSubtitleWords()
-    var current = mutableListOf<VerticalSubtitleGlyph>()
-    var currentAdvance = 0f
-
-    fun flush() {
-        while (current.firstOrNull()?.spacer == true) current.removeAt(0)
-        while (current.lastOrNull()?.spacer == true) current.removeAt(current.lastIndex)
-        if (current.isNotEmpty()) columns += current.toList()
-        current = mutableListOf()
-        currentAdvance = 0f
-    }
-
-    fun addWord(word: List<VerticalSubtitleGlyph>) {
-        if (word.isEmpty()) return
-        val separatorAdvance =
-            if (current.isEmpty()) 0f else VerticalSubtitleWordSpacing
-        val wordAdvance = word.verticalWrapAdvance()
-        if (
-            current.isNotEmpty() &&
-            currentAdvance + separatorAdvance + wordAdvance > safeMaxAdvance
-        ) {
-            flush()
-        }
-        if (current.isNotEmpty()) {
-            current += verticalSubtitleWordSpacer()
-            currentAdvance += VerticalSubtitleWordSpacing
-        }
-        current.addAll(word)
-        currentAdvance += wordAdvance
-    }
-
-    words.forEach { word ->
-        if (word.verticalWrapAdvance() > safeMaxAdvance) {
-            if (current.isNotEmpty()) {
-                flush()
-            }
-            word.wrapLongVerticalSubtitleWord(safeMaxAdvance).forEach {
-                current.addAll(it)
-                currentAdvance = it.verticalWrapAdvance()
-                flush()
-            }
-        } else {
-            addWord(word)
-        }
-    }
-    flush()
-    return columns
-}
-
-private fun List<VerticalSubtitleGlyph>.toVerticalSubtitleWords(): List<List<VerticalSubtitleGlyph>> {
-    val words = mutableListOf<List<VerticalSubtitleGlyph>>()
-    var current = mutableListOf<VerticalSubtitleGlyph>()
-
-    fun flush() {
-        if (current.isNotEmpty()) {
-            words += current.toList()
-            current = mutableListOf()
-        }
-    }
-
-    forEach { glyph ->
-        if (glyph.spacer) {
-            flush()
-        } else {
-            current += glyph
-        }
-    }
-    flush()
-    return words
-}
-
-private fun List<VerticalSubtitleGlyph>.wrapLongVerticalSubtitleWord(
-    maxColumnAdvance: Float,
-): List<List<VerticalSubtitleGlyph>> {
-    val safeMaxAdvance = maxColumnAdvance.coerceAtLeast(4f)
-    val columns = mutableListOf<List<VerticalSubtitleGlyph>>()
-    var current = mutableListOf<VerticalSubtitleGlyph>()
-    var currentAdvance = 0f
-
-    fun flush() {
-        if (current.isNotEmpty()) {
-            columns += current.toList()
-            current = mutableListOf()
-            currentAdvance = 0f
-        }
-    }
-
-    forEach { glyph ->
-        val glyphAdvance = glyph.verticalWrapAdvance()
-        if (
-            current.isNotEmpty() &&
-            currentAdvance + glyphAdvance > safeMaxAdvance
-        ) {
-            flush()
-        }
-        current += glyph
-        currentAdvance += glyphAdvance
-    }
-    flush()
-    return columns
-}
-
-internal fun String.toVerticalSubtitleGlyphs(): List<VerticalSubtitleGlyph> {
-    val codePoints = codePoints().toArray()
-    val glyphs = mutableListOf<VerticalSubtitleGlyph>()
-    var index = 0
-    var doubleQuoteOpen = true
-    var singleQuoteOpen = true
-    while (index < codePoints.size) {
-        val codePoint = codePoints[index]
-        if (Character.isWhitespace(codePoint)) {
-            glyphs += VerticalSubtitleGlyph(
-                text = " ",
-                spacer = true,
-                advanceScale = .22f,
-            )
-            index++
-            continue
-        }
-        if (isAsciiEnglishLetter(codePoint)) {
-            val start = index
-            while (index < codePoints.size && isAsciiEnglishLetter(codePoints[index])) {
-                index++
-            }
-            val englishRun = codePoints.copyOfRange(start, index).toCodePointString()
-            glyphs += if (index - start == 1) {
-                VerticalSubtitleGlyph(englishRun)
-            } else {
-                VerticalSubtitleGlyph(
-                    text = englishRun,
-                    rotate = true,
-                    centerInCell = true,
-                    measureRotatedTextAdvance = true,
-                )
-            }
-            continue
-        }
-        if (isEllipsisDot(codePoint)) {
-            val start = index
-            while (
-                index < codePoints.size &&
-                isEllipsisDot(codePoints[index])
-            ) {
-                index++
-            }
-            val dotRun = codePoints.copyOfRange(start, index)
-            if (dotRun.size > 1 || dotRun.firstOrNull() == '…'.code) {
-                glyphs += VerticalSubtitleGlyph(
-                    "︙",
-                    advanceScale = .82f,
-                    centerInCell = true,
-                )
-            } else {
-                glyphs += VerticalSubtitleGlyph(
-                    verticalPunctuationForm(dotRun.first()) ?: dotRun.toCodePointString(),
-                    centerInCell = true,
-                )
-            }
-            continue
-        }
-        if (codePoint == '"'.code) {
-            glyphs += VerticalSubtitleGlyph(
-                if (doubleQuoteOpen) "﹁" else "﹂",
-                centerInCell = true,
-            )
-            doubleQuoteOpen = !doubleQuoteOpen
-            index++
-            continue
-        }
-        if (codePoint == '\''.code && !isApostropheInsideWord(codePoints, index)) {
-            glyphs += VerticalSubtitleGlyph(
-                if (singleQuoteOpen) "﹃" else "﹄",
-                centerInCell = true,
-            )
-            singleQuoteOpen = !singleQuoteOpen
-            index++
-            continue
-        }
-        verticalPunctuationForm(codePoint)?.let { verticalForm ->
-            glyphs += VerticalSubtitleGlyph(
-                verticalForm,
-                centerInCell = true,
-            )
-            index++
-            continue
-        }
-        rotatedVerticalSymbolGlyph(codePoint)?.let { glyph ->
-            glyphs += glyph
-            index++
-            continue
-        }
-        glyphs += VerticalSubtitleGlyph(String(Character.toChars(codePoint)))
-        index++
-    }
-    return glyphs
-}
-
-private fun isAsciiEnglishLetter(codePoint: Int): Boolean =
-    codePoint in 'A'.code..'Z'.code || codePoint in 'a'.code..'z'.code
-
-private fun List<VerticalSubtitleGlyph>.verticalAdvance(): Float =
-    sumOf { it.advanceScale.toDouble() }.toFloat()
-
-private fun List<VerticalSubtitleGlyph>.verticalWrapAdvance(): Float =
-    sumOf { it.verticalWrapAdvance().toDouble() }.toFloat()
-
-private fun VerticalSubtitleGlyph.verticalWrapAdvance(): Float =
-    advanceScale
-
-private fun verticalSubtitleWordSpacer(): VerticalSubtitleGlyph =
-    VerticalSubtitleGlyph(
-        text = " ",
-        spacer = true,
-        advanceScale = VerticalSubtitleWordSpacing,
-    )
-
-private fun isEllipsisDot(codePoint: Int): Boolean =
-    codePoint == '.'.code ||
-        codePoint == '．'.code ||
-        codePoint == '·'.code ||
-        codePoint == '•'.code ||
-        codePoint == '…'.code
-
-private fun verticalPunctuationForm(codePoint: Int): String? =
-    when (codePoint) {
-        ','.code, '，'.code -> "︐"
-        '、'.code, '､'.code -> "︑"
-        '.'.code, '．'.code, '。'.code -> "︒"
-        ':'.code, '：'.code -> "︓"
-        ';'.code, '；'.code -> "︔"
-        '!'.code, '！'.code -> "︕"
-        '?'.code, '？'.code -> "︖"
-        '('.code, '（'.code -> "︵"
-        ')'.code, '）'.code -> "︶"
-        '{'.code, '｛'.code -> "︷"
-        '}'.code, '｝'.code -> "︸"
-        '〔'.code -> "︹"
-        '〕'.code -> "︺"
-        '【'.code -> "︻"
-        '】'.code -> "︼"
-        '《'.code -> "︽"
-        '》'.code -> "︾"
-        '〈'.code, '<'.code, '＜'.code -> "︿"
-        '〉'.code, '>'.code, '＞'.code -> "﹀"
-        '「'.code, '“'.code, '‘'.code, '｢'.code -> "﹁"
-        '」'.code, '”'.code, '’'.code, '｣'.code -> "﹂"
-        '『'.code, '〝'.code -> "﹃"
-        '』'.code, '〟'.code -> "﹄"
-        '['.code, '［'.code -> "﹇"
-        ']'.code, '］'.code -> "﹈"
-        '—'.code, '―'.code -> "︱"
-        '-'.code, '－'.code, '–'.code -> "︲"
-        '_'.code, '＿'.code -> "︳"
-        '〜'.code, '～'.code, '~'.code -> "︴"
-        else -> null
-    }
-
-private fun rotatedVerticalSymbolGlyph(codePoint: Int): VerticalSubtitleGlyph? =
-    if (isRotatedSymbol(codePoint)) {
-        VerticalSubtitleGlyph(
-            String(Character.toChars(codePoint)),
-            rotate = true,
-            advanceScale = .84f,
-            centerInCell = true,
-        )
-    } else {
-        null
-    }
-
-private fun isRotatedSymbol(codePoint: Int): Boolean =
-    codePoint in listOf(
-        '/'.code,
-        '\\'.code,
-        '|'.code,
-        '@'.code,
-        '#'.code,
-        '$'.code,
-        '%'.code,
-        '^'.code,
-        '&'.code,
-        '*'.code,
-        '+'.code,
-        '='.code,
-    )
-
-private fun isApostropheInsideWord(codePoints: IntArray, index: Int): Boolean =
-    index > 0 &&
-        index < codePoints.lastIndex &&
-        Character.isLetterOrDigit(codePoints[index - 1]) &&
-        Character.isLetterOrDigit(codePoints[index + 1])
-
-private fun IntArray.toCodePointString(): String =
-    joinToString(separator = "") { codePoint ->
-        String(Character.toChars(codePoint))
-    }
 
 private fun formatSubtitleOffset(value: Int): String =
     when {
