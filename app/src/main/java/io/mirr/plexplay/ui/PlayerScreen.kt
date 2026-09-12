@@ -668,7 +668,7 @@ fun PlayerScreen(
     onPlayPrevious: (Long) -> Unit,
     onPlayNext: (Long) -> Unit,
     onClose: () -> Unit,
-    onPlaybackCompleted: (Long) -> Unit,
+    onPlaybackCompleted: (PlaybackSource, Long) -> Unit,
     onProgress: (PlaybackSource, Long, String) -> Unit,
     onPlaybackUnavailable: (Long) -> Unit,
 ) {
@@ -1246,7 +1246,7 @@ fun PlayerScreen(
         completionHandled = true
         val position = player.currentPosition.coerceAtLeast(0)
         player.pause()
-        onPlaybackCompleted(position)
+        onPlaybackCompleted(source, position)
     }
 
     fun showGestureFeedback(message: String) {

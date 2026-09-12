@@ -5,6 +5,15 @@ Android 기본 디코더가 열지 못하는 영상·오디오를 로컬 범용 
 별도 Android 프로젝트입니다. 원본 `Plex Play`와 앱 ID 및 설정 저장소가 달라 두 앱을
 같은 기기에 동시에 설치할 수 있습니다.
 
+현재 개발·배포 대상은 Universal입니다. 기존 Plex Play는 더 이상 새 버전을 빌드하거나 배포하지 않습니다.
+
+## 1.0.15 변경 사항
+
+- 이전화·다음화·자동 다음 재생을 실제 파일의 같은 상위 폴더 안으로 제한합니다.
+- 지정한 라이브러리에서 영상 재생이 완료되면 기존 컬렉션을 제거하고 `KILL` 또는 경로 예외에 해당하는 `123` 하나만 저장합니다.
+- 경로를 확인할 수 없거나 서버 편집 권한이 없으면 컬렉션을 변경하지 않고 안내합니다. 자세한 대상·예외 경로는 [사용 설명서](USER_GUIDE.md#재생-완료-시-자동-컬렉션-지정)에 있습니다.
+- 재생 중 서버·계정이 바뀌거나 이전 재생 세션에서 뒤늦게 완료 이벤트가 발생해도 다른 영상의 완료·컬렉션을 변경하지 않도록 확인합니다.
+
 ## 재생 방식
 
 1. 기기에서 원본 재생 지원으로 확인된 영상은 Media3로 재생합니다.
@@ -64,13 +73,15 @@ AAC, AC-3, E-AC-3, DTS, FLAC, Vorbis, Opus 계열 오디오를 폭넓게 처리�
 
 - 앱 이름: `Plex Play Universal`
 - applicationId: `io.mirr.plexplay.universal`
-- 현재 버전: `1.0.12`
+- 현재 버전: `1.0.15`
 - 업데이트 채널: `bluemirr8520-lgtm/plex-play-universal-updates`
 - APK 파일명: `PlexPlayUniversal.apk`
 
 ## 빌드
 
 JDK 17과 Android SDK 36이 필요합니다.
+
+정식 APK는 기존 서명 키를 보관한 GitHub Actions에서 빌드합니다. 로컬 정식 빌드는 `PLEX_RELEASE_KEYSTORE`, `PLEX_RELEASE_STORE_PASSWORD`, `PLEX_RELEASE_KEY_ALIAS`, `PLEX_RELEASE_KEY_PASSWORD` 설정이 필요합니다. 서명 정보가 없으면 정식 빌드를 중지합니다.
 
 ```powershell
 .\gradlew.bat assembleRelease

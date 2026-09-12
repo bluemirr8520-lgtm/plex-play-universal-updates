@@ -35,7 +35,7 @@ fun UniversalPlayerHost(
     onPlayPrevious: (Long) -> Unit,
     onPlayNext: (Long) -> Unit,
     onClose: () -> Unit,
-    onPlaybackCompleted: (Long) -> Unit,
+    onPlaybackCompleted: (PlaybackSource, Long) -> Unit,
     onProgress: (PlaybackSource, Long, String) -> Unit,
 ) {
     val context = LocalContext.current

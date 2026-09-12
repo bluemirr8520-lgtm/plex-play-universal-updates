@@ -1,5 +1,7 @@
 package io.mirr.plexplay.data
 
+import java.util.UUID
+
 data class PlexConnection(
     val baseUrl: String = "",
     val token: String = "",
@@ -34,6 +36,8 @@ data class PlexItem(
     val art: String? = null,
     val partKey: String? = null,
     val filePath: String? = null,
+    val selectedMediaIndex: Int = 0,
+    val selectedPartIndex: Int = 0,
     val container: String? = null,
     val videoCodec: String? = null,
     val videoResolution: String? = null,
@@ -54,6 +58,7 @@ data class PlexItem(
     val librarySectionId: String? = null,
     val actors: List<PlexTag> = emptyList(),
     val genres: List<PlexTag> = emptyList(),
+    val collections: List<String> = emptyList(),
     val subtitles: List<PlexSubtitle> = emptyList(),
     val leafCount: Int = 0,
     val viewedLeafCount: Int = 0,
@@ -134,6 +139,9 @@ data class PlaybackSource(
     val videoColorTransfer: String? = null,
     val dolbyVisionProfile: Int? = null,
     val audioCodec: String? = null,
+    val serverBaseUrl: String? = null,
+    // Engine fallback copies keep this ID; opening/reloading a video creates a new one.
+    val playbackId: String = UUID.randomUUID().toString(),
 )
 
 enum class PlaybackQuality(

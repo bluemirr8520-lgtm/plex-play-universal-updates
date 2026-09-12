@@ -6,9 +6,14 @@ import androidx.lifecycle.viewModelScope
 import io.mirr.plexplay.data.PlaybackSource
 import io.mirr.plexplay.data.PlaybackQuality
 import io.mirr.plexplay.data.PlexConnection
+import io.mirr.plexplay.data.PlexException
 import io.mirr.plexplay.data.PlexItem
 import io.mirr.plexplay.data.PlexRepository
 import io.mirr.plexplay.data.PlexSection
+import io.mirr.plexplay.data.matchesPlaybackCompletion
+import io.mirr.plexplay.data.playbackFolderKey
+import io.mirr.plexplay.data.sameFolderPlaybackQueue
+import io.mirr.plexplay.data.validatedPlaybackNeighbor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -93,6 +98,8 @@ class PlexViewModel(
     private var playingItem: PlexItem? = null
     private var playbackQueue: List<PlexItem> = emptyList()
     private var playbackQueueIndex: Int = -1
+    private var completingPlaybackId: String? = null
+    private val pendingCollectionUpdates = mutableSetOf<String>()
 
     init {
         if (_state.value.connection.isConfigured) refresh()
@@ -467,8 +474,13 @@ class PlexViewModel(
         }
     }
 
-    fun completePlayback(positionMs: Long) {
+    fun completePlayback(completedSource: PlaybackSource, positionMs: Long) {
         val source = _state.value.playback ?: return
+        if (!matchesPlaybackCompletion(source, completedSource) ||
+            completingPlaybackId == source.playbackId
+        ) return
+        completingPlaybackId = source.playbackId
+        val completedItem = playingItem
         val currentState = _state.value
         val returnToHome = currentState.isHome
         val selectedSection = currentState.selectedSection
@@ -507,12 +519,17 @@ class PlexViewModel(
                 runCatching {
                     repository.timeline(source, "stopped", positionMs)
                 }
-                repository.setWatched(source.ratingKey, watched = true)
+                if (!repository.setWatched(source, watched = true)) return@launch
+                updateCompletedPlaybackCollection(source, completedItem, sections)
                 if (nextItem != null) {
+                    // Closing, signing out, or selecting another video while the
+                    // watched update is pending must cancel this automatic next.
+                    if (!matchesPlaybackCompletion(_state.value.playback, source)) return@launch
                     openPlayback(
                         item = nextItem,
                         resetResume = true,
                         notice = "다음화를 자동 재생합니다.",
+                        requiredFolder = playbackFolderKey(source.filePath),
                     )
                 } else if (returnToHome) {
                     loadHomeInternal(sections)
@@ -543,9 +560,37 @@ class PlexViewModel(
                     }
                 }
             } catch (error: Throwable) {
+                // An ended video must not retain a stale next-item index if its
+                // successor moved folders or could not be opened.
+                if (nextItem != null) closePlayer()
                 showError(error)
             } finally {
                 _state.update { it.copy(isLoading = false) }
+            }
+        }
+    }
+
+    private fun updateCompletedPlaybackCollection(
+        source: PlaybackSource,
+        item: PlexItem?,
+        sections: List<PlexSection>,
+    ) {
+        if (!pendingCollectionUpdates.add(source.playbackId)) return
+        viewModelScope.launch {
+            try {
+                val tag = repository.updateCompletedPlaybackCollection(source, item, sections)
+                if (tag != null) {
+                    _state.update { it.copy(notice = "재생 완료 영상의 컬렉션을 $tag 하나로 변경했습니다.") }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                // Do not stop next playback or roll back the successful watched-state update.
+                _state.update {
+                    it.copy(notice = "시청 완료는 저장됐지만 컬렉션 변경에 실패했습니다. ${error.message.orEmpty()}")
+                }
+            } finally {
+                pendingCollectionUpdates.remove(source.playbackId)
             }
         }
     }
@@ -554,7 +599,7 @@ class PlexViewModel(
         val source = _state.value.playback ?: return
         val nextItem = nextPlaybackItem()
         if (nextItem == null) {
-            _state.update { it.copy(notice = "다음화가 없습니다.") }
+            _state.update { it.copy(notice = "같은 폴더에 다음 영상이 없습니다.") }
             return
         }
         val previousIndex = playbackQueueIndex
@@ -575,6 +620,7 @@ class PlexViewModel(
                     item = nextItem,
                     resetResume = true,
                     notice = "다음화로 이동했습니다.",
+                    requiredFolder = playbackFolderKey(source.filePath),
                 )
             } catch (error: Throwable) {
                 playbackQueueIndex = previousIndex
@@ -610,6 +656,7 @@ class PlexViewModel(
                     item = previousItem,
                     resetResume = true,
                     notice = "이전화로 이동했습니다.",
+                    requiredFolder = playbackFolderKey(source.filePath),
                 )
             } catch (error: Throwable) {
                 playbackQueueIndex = previousIndex
@@ -626,7 +673,7 @@ class PlexViewModel(
             it.copy(
                 autoPlayNext = enabled,
                 notice = if (enabled) {
-                    "다음화 자동재생을 켰습니다."
+                    "같은 폴더의 다음 영상 자동재생을 켰습니다."
                 } else {
                     "다음화 자동재생을 껐습니다."
                 },
@@ -863,9 +910,16 @@ class PlexViewModel(
                 val source = repository.playback(item).copy(
                     resumePositionMs = positionMs,
                 )
+                bindPlaybackQueue(item, source)
+                val previousItem = previousPlaybackItem(source)
+                val nextItem = nextPlaybackItem(source)
                 _state.update {
                     it.copy(
                         playback = source,
+                        hasPreviousPlayback = previousItem != null,
+                        previousPlaybackTitle = previousItem?.title,
+                        hasNextPlayback = nextItem != null,
+                        nextPlaybackTitle = nextItem?.title,
                         notice = "${quality.label}를 현재 재생에 적용했습니다.",
                     )
                 }
@@ -911,13 +965,17 @@ class PlexViewModel(
         item: PlexItem,
         resetResume: Boolean = false,
         notice: String? = null,
+        requiredFolder: String? = null,
     ) {
         val source = repository.playback(item).let {
             if (resetResume) it.copy(resumePositionMs = 0) else it
         }
-        playingItem = item
-        val previousItem = previousPlaybackItem()
-        val nextItem = nextPlaybackItem()
+        if (requiredFolder != null && playbackFolderKey(source.filePath) != requiredFolder) {
+            throw PlexException("영상의 폴더가 변경되었거나 확인되지 않아 다음 재생을 중지했습니다.")
+        }
+        bindPlaybackQueue(item, source)
+        val previousItem = previousPlaybackItem(source)
+        val nextItem = nextPlaybackItem(source)
         _state.update { current ->
             current.copy(
                 playback = source,
@@ -931,36 +989,57 @@ class PlexViewModel(
         }
     }
 
+    private fun bindPlaybackQueue(item: PlexItem, source: PlaybackSource) {
+        completingPlaybackId = null
+        val resolvedItem = item.copy(filePath = source.filePath)
+        playbackQueue = sameFolderPlaybackQueue(resolvedItem, playbackQueue)
+        playbackQueueIndex = playbackQueue.indexOfFirst { it.ratingKey == item.ratingKey }
+        playingItem = resolvedItem
+    }
+
     private fun clearPlaybackQueue() {
+        completingPlaybackId = null
         playingItem = null
         playbackQueue = emptyList()
         playbackQueueIndex = -1
     }
 
-    private fun nextPlaybackItem(): PlexItem? =
-        playbackQueue.getOrNull(playbackQueueIndex + 1)
-            ?.takeIf { it.isPlayable }
+    private fun nextPlaybackItem(source: PlaybackSource? = _state.value.playback): PlexItem? =
+        validatedPlaybackNeighbor(playingItem, source, playbackQueue.getOrNull(playbackQueueIndex + 1))
 
-    private fun previousPlaybackItem(): PlexItem? =
-        playbackQueue.getOrNull(playbackQueueIndex - 1)
-            ?.takeIf { it.isPlayable }
+    private fun previousPlaybackItem(source: PlaybackSource? = _state.value.playback): PlexItem? =
+        validatedPlaybackNeighbor(playingItem, source, playbackQueue.getOrNull(playbackQueueIndex - 1))
 
     private suspend fun playbackQueueFor(
         item: PlexItem,
         state: PlexUiState,
     ): List<PlexItem> {
+        val current = if (playbackFolderKey(item.filePath) == null) {
+            try {
+                repository.itemDetails(item)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                item
+            }
+        } else {
+            item
+        }
+        if (playbackFolderKey(current.filePath) == null) return listOf(current)
         if (
-            item.type == "episode" ||
-            item.parentRatingKey != null ||
-            item.parentKey != null
+            current.type == "episode" ||
+            current.parentRatingKey != null ||
+            current.parentKey != null
         ) {
-            val seasonQueue = runCatching {
-                repository.seasonSiblings(item)
-            }.getOrDefault(emptyList())
-                .filter { it.isPlayable }
-                .distinctBy { it.ratingKey }
+            val seasonQueue = try {
+                repository.seasonSiblings(current)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                emptyList()
+            }
             if (seasonQueue.any { it.ratingKey == item.ratingKey }) {
-                return seasonQueue
+                return sameFolderPlaybackQueue(current, seasonQueue)
             }
         }
         val candidates = buildList {
@@ -974,9 +1053,7 @@ class PlexViewModel(
         val queue = candidates.firstOrNull { items ->
             items.any { it.ratingKey == item.ratingKey }
         }.orEmpty()
-            .filter { it.isPlayable }
-            .distinctBy { it.ratingKey }
-        return queue.ifEmpty { listOf(item) }
+        return sameFolderPlaybackQueue(current, queue)
     }
 
     fun clearError() = _state.update { it.copy(error = null) }

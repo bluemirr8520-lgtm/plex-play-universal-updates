@@ -166,6 +166,45 @@ class PlexRepository(
     suspend fun setWatched(ratingKey: String, watched: Boolean) =
         api().setWatched(ratingKey, watched)
 
+    suspend fun setWatched(source: PlaybackSource, watched: Boolean): Boolean {
+        val connection = validatedPlaybackConnection(source, store.load()) ?: return false
+        api(connection).setWatched(source.ratingKey, watched)
+        return true
+    }
+
+    /** Only called after a real playback-end event, never by manual watched/unwatched actions. */
+    suspend fun updateCompletedPlaybackCollection(
+        source: PlaybackSource,
+        knownItem: PlexItem?,
+        knownSections: List<PlexSection>,
+    ): String? {
+        val connection = validatedPlaybackConnection(source, store.load()) ?: return null
+        val knownSection = knownSections.firstOrNull { it.key == knownItem?.librarySectionId }
+        if (knownItem != null && knownSection != null &&
+            !managesWatchedCollections(knownSection.title, knownItem.type)
+        ) return null
+
+        val api = api(connection)
+        val item = api.metadata(source.ratingKey).firstOrNull { it.ratingKey == source.ratingKey }
+            ?: throw PlexException("재생 완료 영상의 컬렉션 정보를 확인하지 못했습니다.")
+        val section = api.sections().firstOrNull { it.key == item.librarySectionId }
+            ?: throw PlexException("재생 완료 영상의 라이브러리를 확인하지 못했습니다.")
+        if (!managesWatchedCollections(section.title, item.type)) return null
+        val tag = watchedCollectionTag(section.title, item.type, source.filePath)
+            ?: throw PlexException("실제 재생 파일 경로를 확인할 수 없어 컬렉션을 변경하지 않았습니다.")
+        val mediaType = if (item.type == "video" && section.type == "movie") "movie" else item.type
+        // A user may sign out or switch servers while the metadata request is pending.
+        if (store.load() != connection) return null
+        api.replaceCollectionTag(
+            sectionId = section.key,
+            ratingKey = source.ratingKey,
+            mediaType = mediaType,
+            tag = tag,
+            existingCollections = item.collections,
+        )
+        return tag
+    }
+
     suspend fun removeFromContinueWatching(item: PlexItem) =
         api().removeFromContinueWatching(item.ratingKey)
 
@@ -197,10 +236,16 @@ class PlexRepository(
     }
 
     suspend fun playback(item: PlexItem): PlaybackSource {
-        val resolved = api().metadata(item.ratingKey).firstOrNull() ?: item
+        val connection = store.load()
+        // Keep manual playback's cached Part fallback, but an empty metadata
+        // response cannot revalidate the physical folder for next/previous play.
+        val resolved = api(connection).metadata(item.ratingKey).firstOrNull()
+            ?: item.copy(filePath = null)
+        if (store.load() != connection) {
+            throw PlexException("서버 연결이 변경되어 이전 영상의 재생 요청을 중지했습니다.")
+        }
         val part = resolved.partKey
             ?: throw PlexException("이 항목은 직접 재생할 수 없습니다.")
-        val connection = store.load()
         val quality = store.playbackQuality()
         val directUrl = api(connection).absoluteUrl(part)
         val playbackUrl =
@@ -214,17 +259,20 @@ class PlexRepository(
                     connection = connection,
                     ratingKey = item.ratingKey,
                     quality = quality,
+                    mediaIndex = resolved.selectedMediaIndex,
+                    partIndex = resolved.selectedPartIndex,
                 )
             }
         return PlaybackSource(
             url = playbackUrl,
+            serverBaseUrl = connection.baseUrl,
             fallbackUrls =
                 if (playbackUrl != directUrl) {
                     listOf(directUrl)
                 } else {
                     emptyList()
                 },
-            filePath = resolved.filePath ?: part,
+            filePath = resolved.filePath,
             token = connection.token,
             title = item.title,
             subtitle = item.subtitle,
@@ -292,7 +340,8 @@ class PlexRepository(
     }
 
     suspend fun timeline(source: PlaybackSource, state: String, positionMs: Long) {
-        api().timeline(
+        val connection = validatedPlaybackConnection(source, store.load()) ?: return
+        api(connection).timeline(
             ratingKey = source.ratingKey,
             key = "/library/metadata/${source.ratingKey}",
             state = state,
@@ -329,14 +378,16 @@ class PlexRepository(
         connection: PlexConnection,
         ratingKey: String,
         quality: PlaybackQuality,
+        mediaIndex: Int,
+        partIndex: Int,
     ): String {
         val sessionIdentifier = UUID.randomUUID().toString()
         val maxVideoBitrate =
             checkNotNull(quality.maxBitrateKbps).toString()
         val parameters = linkedMapOf(
             "path" to "/library/metadata/$ratingKey",
-            "mediaIndex" to "0",
-            "partIndex" to "0",
+            "mediaIndex" to mediaIndex.toString(),
+            "partIndex" to partIndex.toString(),
             "protocol" to "hls",
             "fastSeek" to "1",
             "hasMDE" to "1",

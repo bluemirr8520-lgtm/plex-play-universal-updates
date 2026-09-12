@@ -350,7 +350,7 @@ fun VlcPlayerScreen(
     onPlayPrevious: (Long) -> Unit,
     onPlayNext: (Long) -> Unit,
     onClose: () -> Unit,
-    onPlaybackCompleted: (Long) -> Unit,
+    onPlaybackCompleted: (PlaybackSource, Long) -> Unit,
     onProgress: (PlaybackSource, Long, String) -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -976,7 +976,7 @@ fun VlcPlayerScreen(
                                 if (endedNormally) {
                                     completed = true
                                     latestOnProgress(source, actualPosition, "stopped")
-                                    latestOnPlaybackCompleted(actualPosition)
+                                    latestOnPlaybackCompleted(source, actualPosition)
                                 } else if (!recoverPlayback(actualPosition)) {
                                     isPlaying = false
                                     isBuffering = false

@@ -39,16 +39,41 @@ internal object PlexXmlParser {
         val parser = newParser(input)
         val result = mutableListOf<PlexItem>()
         var current: MutableItem? = null
+        var currentItemDepth = -1
+        var ignoredItemDepth = -1
         var mediaIndex = -1
         var partIndex = -1
         var currentPartKey: String? = null
+        var containerLibrarySectionId: String? = null
 
         while (parser.next() != XmlPullParser.END_DOCUMENT) {
+            if (ignoredItemDepth >= 0) {
+                if (parser.eventType == XmlPullParser.END_TAG && parser.depth == ignoredItemDepth) {
+                    ignoredItemDepth = -1
+                }
+                continue
+            }
+            if (current != null && parser.eventType == XmlPullParser.START_TAG &&
+                parser.depth > currentItemDepth &&
+                parser.name in setOf("Video", "Directory", "Track", "Photo")
+            ) {
+                // Related/extra child items are not the current playback item.
+                // Ignore their entire subtree, including media and file paths.
+                ignoredItemDepth = parser.depth
+                continue
+            }
             when (parser.eventType) {
                 XmlPullParser.START_TAG -> when (parser.name) {
+                    "MediaContainer" -> {
+                        if (parser.depth == 1) {
+                            containerLibrarySectionId = parser.attr("librarySectionID")
+                                ?.takeIf { it.isNotBlank() }
+                        }
+                    }
                     "Video", "Directory", "Track", "Photo" -> {
                         if (current == null) {
-                            current = MutableItem.from(parser)
+                            current = MutableItem.from(parser, containerLibrarySectionId)
+                            currentItemDepth = parser.depth
                             mediaIndex = -1
                             partIndex = -1
                             currentPartKey = null
@@ -76,7 +101,11 @@ internal object PlexXmlParser {
                         partIndex++
                         currentPartKey = parser.attr("key")
                         partKey = currentPartKey
-                        filePath = parser.attr("file") ?: filePath
+                        // Keep the path paired with the selected Part.key. A previous
+                        // part's path must not establish the next-playback folder.
+                        filePath = parser.attr("file")
+                        selectedMediaIndex = mediaIndex.coerceAtLeast(0)
+                        selectedPartIndex = partIndex.coerceAtLeast(0)
                         container = parser.attr("container") ?: container
                     }
                     "Stream" -> {
@@ -173,11 +202,19 @@ internal object PlexXmlParser {
                             filter = parser.attr("filter"),
                         ),
                     )
+                    "Collection" -> parser.attr("tag")?.let { tag ->
+                        if (parser.depth == currentItemDepth + 1) {
+                            current?.collections?.add(tag)
+                        }
+                    }
                 }
                 XmlPullParser.END_TAG -> {
-                    if (current != null && parser.name in setOf("Video", "Directory", "Track", "Photo")) {
+                    if (current != null && parser.depth == currentItemDepth &&
+                        parser.name in setOf("Video", "Directory", "Track", "Photo")
+                    ) {
                         result += current.toItem()
                         current = null
+                        currentItemDepth = -1
                     }
                 }
             }
@@ -213,6 +250,8 @@ internal object PlexXmlParser {
         val childCount: Int,
         var partKey: String? = null,
         var filePath: String? = null,
+        var selectedMediaIndex: Int = 0,
+        var selectedPartIndex: Int = 0,
         var container: String? = null,
         var videoCodec: String? = null,
         var videoResolution: String? = null,
@@ -230,6 +269,7 @@ internal object PlexXmlParser {
         var audioStreamCaptured: Boolean = false,
         val actors: MutableList<PlexTag> = mutableListOf(),
         val genres: MutableList<PlexTag> = mutableListOf(),
+        val collections: MutableList<String> = mutableListOf(),
         val subtitles: MutableList<PlexSubtitle> = mutableListOf(),
     ) {
         fun toItem() = PlexItem(
@@ -247,6 +287,8 @@ internal object PlexXmlParser {
             art = art,
             partKey = partKey,
             filePath = filePath,
+            selectedMediaIndex = selectedMediaIndex,
+            selectedPartIndex = selectedPartIndex,
             container = container,
             videoCodec = videoCodec,
             videoResolution = videoResolution,
@@ -267,6 +309,7 @@ internal object PlexXmlParser {
             librarySectionId = librarySectionId,
             actors = actors.filter { it.tag.isNotBlank() }.distinctBy { it.id ?: it.tag },
             genres = genres.filter { it.tag.isNotBlank() }.distinctBy { it.id ?: it.tag },
+            collections = collections.filter { it.isNotBlank() }.distinct(),
             subtitles = subtitles.toList(),
             leafCount = leafCount,
             viewedLeafCount = viewedLeafCount,
@@ -274,7 +317,7 @@ internal object PlexXmlParser {
         )
 
         companion object {
-            fun from(parser: XmlPullParser): MutableItem {
+            fun from(parser: XmlPullParser, containerLibrarySectionId: String?): MutableItem {
                 val grandparent = parser.attr("grandparentTitle")
                 val parent = parser.attr("parentTitle")
                 val subtitle = when {
@@ -304,7 +347,9 @@ internal object PlexXmlParser {
                     parentRatingKey = parser.attr("parentRatingKey"),
                     parentKey = parser.attr("parentKey"),
                     grandparentRatingKey = parser.attr("grandparentRatingKey"),
-                    librarySectionId = parser.attr("librarySectionID"),
+                    librarySectionId = parser.attr("librarySectionID")
+                        ?.takeIf { it.isNotBlank() }
+                        ?: containerLibrarySectionId,
                     leafCount = parser.attr("leafCount")?.toIntOrNull() ?: 0,
                     viewedLeafCount =
                         parser.attr("viewedLeafCount")?.toIntOrNull() ?: 0,

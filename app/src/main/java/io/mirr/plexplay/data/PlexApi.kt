@@ -141,6 +141,50 @@ class PlexApi(
         ) { }
     }
 
+    suspend fun replaceCollectionTag(
+        sectionId: String,
+        ratingKey: String,
+        mediaType: String,
+        tag: String,
+        existingCollections: List<String>,
+    ) {
+        val plexType = when (mediaType) {
+            "movie" -> "1"
+            "episode" -> "4"
+            "clip" -> "12"
+            else -> throw PlexException("이 영상 유형에는 컬렉션 태그를 적용할 수 없습니다.")
+        }
+        if (!sectionId.matches(Regex("[0-9]+")) || !ratingKey.matches(Regex("[0-9]+"))) {
+            throw PlexException("컬렉션을 변경할 라이브러리 또는 영상 식별자가 올바르지 않습니다.")
+        }
+        if (tag.isBlank()) throw PlexException("적용할 컬렉션 태그가 비어 있습니다.")
+
+        // Indexed tags append in PMS. Remove every other existing collection
+        // explicitly; disjoint add/remove names make processing order irrelevant.
+        val removedTags = existingCollections.filter { it.isNotBlank() && it != tag }.distinct()
+        request<Unit>(
+            path = "/library/sections/$sectionId/all",
+            query = buildMap {
+                put("id", ratingKey)
+                put("type", plexType)
+                put("collection.locked", "1")
+                put("collection[0].tag.tag", tag)
+                if (removedTags.isNotEmpty()) {
+                    // PMS expects separately quoted tag names inside its comma
+                    // list, before the whole query parameter is URL-encoded.
+                    put("collection[].tag.tag-", removedTags.joinToString(",") { quoteCollectionTag(it) })
+                }
+            },
+            method = "PUT",
+            forbiddenMessage = "컬렉션 변경에는 Plex 메타데이터 편집 권한이 필요합니다. 서버 소유자 계정을 확인해 주세요.",
+        ) { }
+
+        val updated = metadata(ratingKey).singleOrNull { it.ratingKey == ratingKey }
+        if (updated?.collections?.toSet() != setOf(tag)) {
+            throw PlexException("Plex 컬렉션 변경 결과를 확인하지 못했습니다. 지정한 컬렉션만 적용되지 않았습니다.")
+        }
+    }
+
     suspend fun children(path: String): List<PlexItem> =
         request(
             path = path.ensurePath(),
@@ -208,6 +252,7 @@ class PlexApi(
         path: String,
         query: Map<String, String> = emptyMap(),
         method: String = "GET",
+        forbiddenMessage: String? = null,
         parse: (InputStream) -> T,
     ): T = withContext(Dispatchers.IO) {
         val queryString = query.entries.joinToString("&") {
@@ -238,6 +283,7 @@ class PlexApi(
                 if (status !in 200..299) {
                     val message = when (status) {
                         401 -> "Plex 계정 인증에 실패했습니다."
+                        403 -> forbiddenMessage ?: "Plex 서버 접근 권한이 없습니다."
                         404 -> "요청한 Plex 콘텐츠를 찾지 못했습니다."
                         else -> "Plex 서버 응답 오류 ($status)"
                     }
@@ -261,4 +307,6 @@ class PlexApi(
 
     private fun String.ensurePath(): String = if (startsWith("/")) this else "/$this"
     private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())
+    private fun quoteCollectionTag(value: String): String =
+        encode(value).replace("+", "%20").replace("%7E", "~").replace("*", "%2A").replace("%2F", "/")
 }
