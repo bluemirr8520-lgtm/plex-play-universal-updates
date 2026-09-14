@@ -15,6 +15,7 @@ import android.provider.OpenableColumns
 import android.provider.Settings
 import android.view.LayoutInflater
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.KeyEvent as AndroidKeyEvent
 import android.widget.Toast
@@ -47,7 +48,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -86,8 +86,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.DialogWindowProvider
-import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -1497,19 +1495,19 @@ fun PlayerScreen(
             AndroidKeyEvent.KEYCODE_GUIDE,
             AndroidKeyEvent.KEYCODE_BUTTON_MODE,
             -> {
-                if (isDown || isUp) {
+                if (isDown && nativeEvent.repeatCount == 0) {
                     openSettingsFromRemote()
                 }
                 true
             }
             AndroidKeyEvent.KEYCODE_CAPTIONS -> {
-                if (isDown || isUp) {
+                if (isDown && nativeEvent.repeatCount == 0) {
                     openSettingsFromRemote(PlayerSettingsPage.SUBTITLE)
                 }
                 true
             }
             AndroidKeyEvent.KEYCODE_LANGUAGE_SWITCH -> {
-                if (isDown || isUp) {
+                if (isDown && nativeEvent.repeatCount == 0) {
                     openSettingsFromRemote(PlayerSettingsPage.AUDIO)
                 }
                 true
@@ -2140,8 +2138,8 @@ fun PlayerScreen(
                     ) as PlayerView
                     ).apply {
                     playerViewHandle = this
-                    isFocusable = true
-                    isFocusableInTouchMode = true
+                    isFocusable = !playerSettingsVisible
+                    isFocusableInTouchMode = !playerSettingsVisible
                     setOnKeyListener { _, _, keyEvent ->
                         handlePlayerRemoteKey(keyEvent)
                     }
@@ -2171,7 +2169,7 @@ fun PlayerScreen(
                     findViewById<View>(androidx.media3.ui.R.id.exo_settings)
                         ?.visibility = View.GONE
                     post {
-                        requestFocus()
+                        if (!playerSettingsVisible) requestFocus()
                         configureEpisodeNavigation(this)
                         hideController()
                     }
@@ -2179,6 +2177,13 @@ fun PlayerScreen(
             },
             update = {
                 playerViewHandle = it
+                it.descendantFocusability = if (playerSettingsVisible) {
+                    ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                } else {
+                    ViewGroup.FOCUS_AFTER_DESCENDANTS
+                }
+                it.isFocusable = !playerSettingsVisible
+                it.isFocusableInTouchMode = !playerSettingsVisible
                 it.player = player
                 it.setOnKeyListener { _, _, keyEvent ->
                     handlePlayerRemoteKey(keyEvent)
@@ -2210,7 +2215,7 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxSize(),
         )
         AnimatedVisibility(
-            visible = controllerVisible,
+            visible = controllerVisible && !playerSettingsVisible,
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .statusBarsPadding()
@@ -2233,7 +2238,7 @@ fun PlayerScreen(
             )
         }
         AnimatedVisibility(
-            visible = controllerVisible,
+            visible = controllerVisible && !playerSettingsVisible,
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .statusBarsPadding()
@@ -2245,13 +2250,12 @@ fun PlayerScreen(
                 icon = Icons.Rounded.Settings,
                 contentDescription = "재생 설정",
                 onClick = {
-                    playerSettingsPage = PlayerSettingsPage.MAIN
-                    playerSettingsVisible = true
+                    openPlayerSettings()
                 },
             )
         }
         AnimatedVisibility(
-            visible = controllerVisible,
+            visible = controllerVisible && !playerSettingsVisible,
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
@@ -2331,21 +2335,15 @@ fun PlayerScreen(
         val picturePreviewVisible =
             playerSettingsPage == PlayerSettingsPage.DISPLAY ||
                 playerSettingsPage == PlayerSettingsPage.DISPLAY_ADVANCED
-        AlertDialog(
+        PlaybackSettingsPanel(
             modifier = Modifier
                 .focusRequester(playerSettingsFocusRequester)
                 .onPreviewKeyEvent {
                     handlePlayerSettingsKeyEvent(it.nativeKeyEvent)
                 }
                 .focusable(),
-            onDismissRequest = {
-                playerSettingsVisible = false
-                playerSettingsPage = PlayerSettingsPage.MAIN
-            },
-            properties = DialogProperties(
-                usePlatformDefaultWidth = true,
-                decorFitsSystemWindows = false,
-            ),
+            onDismissRequest = ::closeOrStepBackPlayerSettings,
+            previewVideo = picturePreviewVisible,
             containerColor = if (picturePreviewVisible) {
                 Color.Black.copy(alpha = .82f)
             } else {
@@ -2355,9 +2353,6 @@ fun PlayerScreen(
             textContentColor = Color.White,
             title = { Text(playerSettingsPage.title) },
             text = {
-                PictureSettingsPreviewWindowEffect(
-                    enabled = picturePreviewVisible,
-                )
                 Column(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -2939,36 +2934,6 @@ fun PlayerScreen(
 }
 
 @Composable
-private fun PictureSettingsPreviewWindowEffect(
-    enabled: Boolean,
-) {
-    val view = androidx.compose.ui.platform.LocalView.current
-    DisposableEffect(view, enabled) {
-        val window = (view.parent as? DialogWindowProvider)?.window
-        val previousDimAmount = window?.attributes?.dimAmount ?: 0f
-        val hadDimFlag = window?.attributes?.flags?.let { flags ->
-            flags.and(WindowManager.LayoutParams.FLAG_DIM_BEHIND) != 0
-        } ?: false
-
-        if (enabled) {
-            window?.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            window?.setDimAmount(0f)
-        }
-
-        onDispose {
-            if (enabled && window != null) {
-                window.setDimAmount(previousDimAmount)
-                if (hadDimFlag) {
-                    window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-                } else {
-                    window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun PlaybackFilePathPanel(
     filePath: String,
 ) {
@@ -3081,17 +3046,14 @@ private fun applyVideoScaleMode(
     playerView: PlayerView,
     mode: VideoScaleMode,
 ) {
-    playerView.setResizeMode(mode.resizeMode)
-    val surfaceView = playerView.videoSurfaceView
-    surfaceView?.scaleX = mode.scaleX
-    surfaceView?.scaleY = mode.scaleY
-    surfaceView?.requestLayout()
-    surfaceView?.invalidate()
-    playerView.requestLayout()
-    playerView.invalidate()
-    playerView.post {
+    val surfaceView = playerView.videoSurfaceView ?: return
+    playerView.updatePlaybackView(R.id.playback_scale_update_cache, surfaceView, mode) {
         playerView.setResizeMode(mode.resizeMode)
-        playerView.videoSurfaceView?.requestLayout()
+        surfaceView.scaleX = mode.scaleX
+        surfaceView.scaleY = mode.scaleY
+        surfaceView.requestLayout()
+        surfaceView.invalidate()
+        playerView.requestLayout()
     }
 }
 
@@ -3100,13 +3062,15 @@ private fun applyVideoScreenSettings(
     settings: VideoScreenSettings,
 ) {
     val videoSurface = playerView.videoSurfaceView ?: return
-    val colorPaint = buildVideoLayerPaint(settings)
-    if (colorPaint == null) {
-        videoSurface.setLayerType(View.LAYER_TYPE_NONE, null)
-    } else {
-        videoSurface.setLayerType(View.LAYER_TYPE_HARDWARE, colorPaint)
+    playerView.updatePlaybackView(R.id.playback_color_update_cache, videoSurface, settings) {
+        val colorPaint = buildVideoLayerPaint(settings)
+        if (colorPaint == null) {
+            videoSurface.setLayerType(View.LAYER_TYPE_NONE, null)
+        } else {
+            videoSurface.setLayerType(View.LAYER_TYPE_HARDWARE, colorPaint)
+        }
+        videoSurface.invalidate()
     }
-    videoSurface.invalidate()
 }
 
 private fun buildVideoLayerPaint(

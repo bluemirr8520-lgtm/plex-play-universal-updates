@@ -59,7 +59,6 @@ import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
@@ -97,7 +96,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -1617,7 +1615,7 @@ fun VlcPlayerScreen(
         }
 
         AnimatedVisibility(
-            visible = controlsVisible,
+            visible = controlsVisible && !settingsVisible,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier.fillMaxSize(),
@@ -1657,8 +1655,7 @@ fun VlcPlayerScreen(
                     }
                     VlcPlayerSettingsButton(
                         onClick = {
-                            settingsPage = VlcSettingsPage.MAIN
-                            settingsVisible = true
+                            openSettings()
                         },
                         modifier = Modifier
                             .focusRequester(settingsButtonFocusRequester)
@@ -1773,7 +1770,7 @@ fun VlcPlayerScreen(
 
     if (settingsVisible) {
         VlcSettingsDialog(
-            player = mediaPlayer,
+            isPlaying = isPlaying,
             page = settingsPage,
             source = source,
             playbackQuality = playbackQuality,
@@ -1950,7 +1947,7 @@ fun VlcPlayerScreen(
 
 @Composable
 private fun VlcSettingsDialog(
-    player: MediaPlayer?,
+    isPlaying: Boolean,
     page: VlcSettingsPage,
     source: PlaybackSource,
     playbackQuality: PlaybackQuality,
@@ -2000,12 +1997,9 @@ private fun VlcSettingsDialog(
 ) {
     val advancedDisplayFocusRequesters = remember { List(6) { FocusRequester() } }
 
-    AlertDialog(
+    PlaybackSettingsPanel(
         onDismissRequest = onNavigateBack,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = true,
-            decorFitsSystemWindows = false,
-        ),
+        previewVideo = page == VlcSettingsPage.DISPLAY || page == VlcSettingsPage.DISPLAY_ADVANCED,
         containerColor = Color.Black,
         titleContentColor = Color.White,
         textContentColor = Color.White,
@@ -2052,7 +2046,7 @@ private fun VlcSettingsDialog(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
-                                    if (player?.isPlaying == true) "범용 코덱 · 재생 중" else "범용 코덱 · VLC 로컬 재생",
+                                    if (isPlaying) "범용 코덱 · 재생 중" else "범용 코덱 · VLC 로컬 재생",
                                     color = Color(0xFFE5A00D),
                                 )
                             }
@@ -3016,17 +3010,21 @@ private fun applyVlcWindowBrightness(activity: Activity?, brightnessPercent: Flo
 }
 
 private fun applyVlcVideoScale(layout: VLCVideoLayout, mode: VlcVideoScale) {
-    layout.scaleX = 1f
-    layout.scaleY = 1f
     val videoView = layout.findFirstTextureView()
-    if (videoView != null) {
-        videoView.scaleX = mode.scaleX
-        videoView.scaleY = mode.scaleY
-        videoView.requestLayout()
-        videoView.invalidate()
-    } else {
-        layout.scaleX = mode.scaleX
-        layout.scaleY = mode.scaleY
+    layout.updatePlaybackView(R.id.playback_scale_update_cache, videoView ?: layout, mode) {
+        if (videoView != null) {
+            layout.scaleX = 1f
+            layout.scaleY = 1f
+            videoView.scaleX = mode.scaleX
+            videoView.scaleY = mode.scaleY
+            videoView.requestLayout()
+            videoView.invalidate()
+        } else {
+            // Do not reset and reapply a SurfaceView's transform on each
+            // subtitle/time/settings recomposition. That can disrupt TV output.
+            layout.scaleX = mode.scaleX
+            layout.scaleY = mode.scaleY
+        }
     }
 }
 
@@ -3037,13 +3035,15 @@ private fun applyVlcVideoAppearance(layout: VLCVideoLayout, settings: VlcVideoSe
     // compositors dim the whole layer. Keep that path untouched. If LibVLC uses
     // a TextureView on a supported device, the same neutral-safe paint applies.
     val target = layout.findFirstTextureView() ?: return
-    val paint = buildVlcVideoLayerPaint(settings.normalizedForPlayback())
-    if (paint == null) {
-        target.setLayerType(View.LAYER_TYPE_NONE, null)
-    } else {
-        target.setLayerType(View.LAYER_TYPE_HARDWARE, paint)
+    layout.updatePlaybackView(R.id.playback_color_update_cache, target, settings) {
+        val paint = buildVlcVideoLayerPaint(settings.normalizedForPlayback())
+        if (paint == null) {
+            target.setLayerType(View.LAYER_TYPE_NONE, null)
+        } else {
+            target.setLayerType(View.LAYER_TYPE_HARDWARE, paint)
+        }
+        target.invalidate()
     }
-    target.invalidate()
 }
 
 private fun View.findFirstTextureView(): TextureView? {
