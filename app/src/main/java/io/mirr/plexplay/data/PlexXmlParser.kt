@@ -39,6 +39,7 @@ internal object PlexXmlParser {
         val parser = newParser(input)
         val result = mutableListOf<PlexItem>()
         var current: MutableItem? = null
+        var currentMedia: MutableItem? = null
         var currentItemDepth = -1
         var ignoredItemDepth = -1
         var mediaIndex = -1
@@ -73,91 +74,79 @@ internal object PlexXmlParser {
                     "Video", "Directory", "Track", "Photo" -> {
                         if (current == null) {
                             current = MutableItem.from(parser, containerLibrarySectionId)
+                            currentMedia = null
                             currentItemDepth = parser.depth
                             mediaIndex = -1
                             partIndex = -1
                             currentPartKey = null
                         }
                     }
-                    "Media" -> current?.apply {
+                    "Media" -> {
                         mediaIndex++
                         partIndex = -1
                         currentPartKey = null
-                        container = parser.attr("container") ?: container
-                        videoCodec = parser.attr("videoCodec") ?: videoCodec
-                        videoResolution =
-                            parser.attr("videoResolution") ?: videoResolution
-                        videoProfile = parser.attr("videoProfile") ?: videoProfile
-                        videoBitDepth =
-                            parser.attr("videoBitDepth")?.toIntOrNull() ?: videoBitDepth
-                        videoDynamicRange =
-                            parser.attr("videoDynamicRange") ?: videoDynamicRange
-                        audioCodec = parser.attr("audioCodec") ?: audioCodec
-                        audioChannels =
-                            parser.attr("audioChannels")?.toIntOrNull() ?: audioChannels
-                        audioProfile = parser.attr("audioProfile") ?: audioProfile
+                        // A candidate Media must not overwrite the previously selected Part
+                        // until this Media supplies an actual Part of its own.
+                        currentMedia = current?.forMedia(parser)
                     }
-                    "Part" -> current?.apply {
-                        partIndex++
-                        currentPartKey = parser.attr("key")
-                        partKey = currentPartKey
-                        // Keep the path paired with the selected Part.key. A previous
-                        // part's path must not establish the next-playback folder.
-                        filePath = parser.attr("file")
-                        selectedMediaIndex = mediaIndex.coerceAtLeast(0)
-                        selectedPartIndex = partIndex.coerceAtLeast(0)
-                        container = parser.attr("container") ?: container
+                    "Part" -> {
+                        val media = currentMedia
+                        if (media != null) {
+                            partIndex++
+                            currentPartKey = parser.attr("key")
+                            // Each Part starts from its Media's attributes, never a sibling's streams.
+                            current = media.copy(
+                                partKey = currentPartKey,
+                                filePath = parser.attr("file"),
+                                selectedMediaIndex = mediaIndex.coerceAtLeast(0),
+                                selectedPartIndex = partIndex.coerceAtLeast(0),
+                                container = parser.attr("container") ?: media.container,
+                            )
+                        }
                     }
                     "Stream" -> {
-                        if (current != null && parser.attr("streamType") == "1") {
-                            current.videoCodec = parser.attr("codec") ?: current.videoCodec
-                            current.videoProfile =
-                                parser.attr("profile") ?: current.videoProfile
-                            current.videoBitDepth =
-                                parser.attr("bitDepth")?.toIntOrNull()
-                                    ?: current.videoBitDepth
-                            current.videoDynamicRange =
-                                parser.videoDynamicRangeHint()
-                                    ?: current.videoDynamicRange
-                            current.videoColorPrimaries =
-                                parser.attr("colorPrimaries")
-                                    ?: current.videoColorPrimaries
-                            current.videoColorTransfer =
-                                parser.attr("colorTrc")
-                                    ?: parser.attr("colorTransfer")
-                                    ?: current.videoColorTransfer
-                            current.dolbyVisionProfile =
-                                parser.attr("DOVIProfile")?.toIntOrNull()
-                                    ?: current.dolbyVisionProfile
-                            if (current.videoResolution.isNullOrBlank()) {
-                                val width = parser.attr("width")?.toIntOrNull()
-                                val height = parser.attr("height")?.toIntOrNull()
-                                current.videoResolution = when {
-                                    width != null && height != null -> "${width}x$height"
-                                    height != null -> "${height}p"
-                                    else -> null
-                                }
+                        val streamItem = if (currentPartKey == null) currentMedia else current
+                        if (streamItem != null && parser.attr("streamType") == "1" &&
+                            (!streamItem.videoStreamCaptured || parser.attr("selected") == "1")
+                        ) {
+                            streamItem.videoCodec = parser.attr("codec") ?: currentMedia?.videoCodec
+                            streamItem.videoProfile = parser.attr("profile") ?: currentMedia?.videoProfile
+                            streamItem.videoWidth = parsePositiveVideoInt(parser.attr("width"), currentMedia?.videoWidth)
+                            streamItem.videoHeight = parsePositiveVideoInt(parser.attr("height"), currentMedia?.videoHeight)
+                            streamItem.videoFrameRate = parseVideoFrameRate(
+                                parser.attr("frameRate") ?: parser.attr("videoFrameRate"), currentMedia?.videoFrameRate,
+                            )
+                            streamItem.videoBitDepth = parsePositiveVideoInt(parser.attr("bitDepth"), currentMedia?.videoBitDepth)
+                            streamItem.videoDynamicRange = parser.videoDynamicRangeHint() ?: currentMedia?.videoDynamicRange
+                            streamItem.videoColorPrimaries = parser.attr("colorPrimaries") ?: currentMedia?.videoColorPrimaries
+                            streamItem.videoColorTransfer = parser.attr("colorTrc") ?: parser.attr("colorTransfer") ?: currentMedia?.videoColorTransfer
+                            streamItem.dolbyVisionProfile = parser.attr("DOVIProfile")?.toIntOrNull() ?: currentMedia?.dolbyVisionProfile
+                            streamItem.videoResolution = currentMedia?.videoResolution ?: when {
+                                streamItem.videoWidth != null && streamItem.videoHeight != null -> "${streamItem.videoWidth}x${streamItem.videoHeight}"
+                                streamItem.videoHeight != null -> "${streamItem.videoHeight}p"
+                                else -> null
                             }
+                            streamItem.videoStreamCaptured = true
                         }
-                        if (current != null && parser.attr("streamType") == "2") {
+                        if (streamItem != null && parser.attr("streamType") == "2") {
                             val selected = parser.attr("selected") == "1"
-                            if (!current.audioStreamCaptured || selected) {
-                                current.audioCodec =
-                                    parser.attr("codec") ?: current.audioCodec
-                                current.audioChannels =
+                            if (!streamItem.audioStreamCaptured || selected) {
+                                streamItem.audioCodec =
+                                    parser.attr("codec") ?: currentMedia?.audioCodec
+                                streamItem.audioChannels =
                                     parser.attr("channels")?.toIntOrNull()
-                                        ?: current.audioChannels
-                                current.audioLanguage =
+                                        ?: currentMedia?.audioChannels
+                                streamItem.audioLanguage =
                                     parser.attr("language")
                                         ?: parser.attr("languageCode")
-                                        ?: current.audioLanguage
-                                current.audioProfile =
-                                    parser.attr("profile") ?: current.audioProfile
-                                current.audioDisplayTitle =
+                                        ?: currentMedia?.audioLanguage
+                                streamItem.audioProfile =
+                                    parser.attr("profile") ?: currentMedia?.audioProfile
+                                streamItem.audioDisplayTitle =
                                     parser.attr("extendedDisplayTitle")
                                         ?: parser.attr("displayTitle")
-                                        ?: current.audioDisplayTitle
-                                current.audioStreamCaptured = true
+                                        ?: currentMedia?.audioDisplayTitle
+                                streamItem.audioStreamCaptured = true
                             }
                         }
                         val subtitleKey = parser.attr("key")
@@ -167,11 +156,11 @@ internal object PlexXmlParser {
                             "0" -> true
                             else -> subtitleKey.isNullOrBlank()
                         }
-                        if (current != null &&
+                        if (streamItem != null &&
                             parser.attr("streamType") == "3" &&
                             (!subtitleKey.isNullOrBlank() || !subtitleStreamId.isNullOrBlank())
                         ) {
-                            current.subtitles += PlexSubtitle(
+                            streamItem.subtitles += PlexSubtitle(
                                 key = subtitleKey,
                                 streamId = subtitleStreamId,
                                 isEmbedded = subtitleIsEmbedded,
@@ -212,7 +201,7 @@ internal object PlexXmlParser {
                     if (current != null && parser.depth == currentItemDepth &&
                         parser.name in setOf("Video", "Directory", "Track", "Photo")
                     ) {
-                        result += current.toItem()
+                        result += (if (current.partKey == null) currentMedia ?: current else current).toItem()
                         current = null
                         currentItemDepth = -1
                     }
@@ -255,6 +244,9 @@ internal object PlexXmlParser {
         var container: String? = null,
         var videoCodec: String? = null,
         var videoResolution: String? = null,
+        var videoWidth: Int? = null,
+        var videoHeight: Int? = null,
+        var videoFrameRate: Double? = null,
         var videoProfile: String? = null,
         var videoBitDepth: Int? = null,
         var videoDynamicRange: String? = null,
@@ -267,11 +259,36 @@ internal object PlexXmlParser {
         var audioProfile: String? = null,
         var audioDisplayTitle: String? = null,
         var audioStreamCaptured: Boolean = false,
+        var videoStreamCaptured: Boolean = false,
         val actors: MutableList<PlexTag> = mutableListOf(),
         val genres: MutableList<PlexTag> = mutableListOf(),
         val collections: MutableList<String> = mutableListOf(),
         val subtitles: MutableList<PlexSubtitle> = mutableListOf(),
     ) {
+        fun forMedia(parser: XmlPullParser) = copy(
+            partKey = null,
+            filePath = null,
+            container = parser.attr("container"),
+            videoCodec = parser.attr("videoCodec"),
+            videoResolution = parser.attr("videoResolution"),
+            videoWidth = parsePositiveVideoInt(parser.attr("width")),
+            videoHeight = parsePositiveVideoInt(parser.attr("height")),
+            videoFrameRate = parseVideoFrameRate(parser.attr("frameRate") ?: parser.attr("videoFrameRate")),
+            videoProfile = parser.attr("videoProfile"),
+            videoBitDepth = parsePositiveVideoInt(parser.attr("videoBitDepth")),
+            videoDynamicRange = parser.attr("videoDynamicRange"),
+            videoColorPrimaries = parser.attr("colorPrimaries"),
+            videoColorTransfer = parser.attr("colorTrc") ?: parser.attr("colorTransfer"),
+            dolbyVisionProfile = parser.attr("DOVIProfile")?.toIntOrNull(),
+            audioCodec = parser.attr("audioCodec"),
+            audioChannels = parsePositiveVideoInt(parser.attr("audioChannels")),
+            audioLanguage = null,
+            audioProfile = parser.attr("audioProfile"),
+            audioDisplayTitle = null,
+            audioStreamCaptured = false,
+            videoStreamCaptured = false,
+        )
+
         fun toItem() = PlexItem(
             ratingKey = ratingKey,
             key = key,
@@ -292,6 +309,9 @@ internal object PlexXmlParser {
             container = container,
             videoCodec = videoCodec,
             videoResolution = videoResolution,
+            videoWidth = videoWidth,
+            videoHeight = videoHeight,
+            videoFrameRate = videoFrameRate,
             videoProfile = videoProfile,
             videoBitDepth = videoBitDepth,
             videoDynamicRange = videoDynamicRange,

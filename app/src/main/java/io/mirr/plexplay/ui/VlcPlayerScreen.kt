@@ -266,7 +266,7 @@ private enum class VlcOptimizationMode(
     AUTO("auto", "자동 최적화 · 권장", "기기 성능과 재생 형식에 맞춰 자동 조절합니다."),
     STABILITY("stability", "재생 안정성 우선", "버퍼를 늘리고 늦은 프레임을 정리합니다."),
     BALANCED("balanced", "균형", "화질과 재생 안정성을 균형 있게 유지합니다."),
-    PERFORMANCE("performance", "고성능·고해상도 기기", "짧은 버퍼와 하드웨어 디코딩을 우선합니다."),
+    PERFORMANCE("performance", "고성능·고해상도 기기", "짧은 버퍼를 사용합니다. 디코더는 위 설정을 따릅니다."),
     ;
 
     companion object {
@@ -424,6 +424,11 @@ fun VlcPlayerScreen(
             ),
         )
     }
+    var decoderMode by remember {
+        mutableStateOf(VlcDecoderMode.fromStorage(preferences.getString("vlc_decoder_mode", null)))
+    }
+    var softwareFallbackUsed by remember(source.playbackId, decoderMode) { mutableStateOf(false) }
+    var resumePausedAfterRestart by remember(source.playbackId) { mutableStateOf(false) }
     var selectedVideoPreset by remember { mutableIntStateOf(0) }
     var gestureFeedback by remember { mutableStateOf<String?>(null) }
     var gestureFeedbackRevision by remember { mutableIntStateOf(0) }
@@ -433,13 +438,13 @@ fun VlcPlayerScreen(
     var confirmLongPressConsumed by remember { mutableStateOf(false) }
     var isPlaying by remember { mutableStateOf(false) }
     var isBuffering by remember { mutableStateOf(true) }
-    var positionMs by remember(source.ratingKey) {
+    var positionMs by remember(source.playbackId) {
         mutableLongStateOf(source.resumePositionMs)
     }
-    var durationMs by remember(source.ratingKey) {
+    var durationMs by remember(source.playbackId) {
         mutableLongStateOf(source.durationMs.coerceAtLeast(1L))
     }
-    var seekPreview by remember(source.ratingKey) {
+    var seekPreview by remember(source.playbackId) {
         mutableFloatStateOf(source.resumePositionMs.toFloat())
     }
     var draggingProgress by remember { mutableStateOf(false) }
@@ -488,7 +493,7 @@ fun VlcPlayerScreen(
         it.stableId == selectedPlexSubtitleId
     }
     val selectedExternalSubtitleUrl = selectedPlexSubtitle?.url
-    var restorePositionMs by remember(source.ratingKey) {
+    var restorePositionMs by remember(source.playbackId) {
         mutableLongStateOf(source.resumePositionMs)
     }
     var errorMessage by remember { mutableStateOf<String?>(null) }
@@ -825,7 +830,7 @@ fun VlcPlayerScreen(
         }
     }
 
-    DisposableEffect(source.ratingKey, source.url, videoLayout, rendererRevision) {
+    DisposableEffect(source.playbackId, source.ratingKey, source.url, videoLayout, rendererRevision) {
         val layout = videoLayout
         if (layout == null) {
             onDispose { }
@@ -867,6 +872,7 @@ fun VlcPlayerScreen(
                 return@DisposableEffect onDispose { }
             }
             var pendingSeek = restorePositionMs.coerceAtLeast(0L)
+            var pauseOnFirstPlaying = resumePausedAfterRestart
             var completed = false
             val playbackUrls = (listOf(source.url) + source.fallbackUrls)
                 .filter(String::isNotBlank)
@@ -884,6 +890,8 @@ fun VlcPlayerScreen(
             var disposed = false
 
             fun startPlaybackUrl(url: String, resumeAtMs: Long) {
+                // Handle errors from the new Media even if it never reaches Playing.
+                restartingPlayback = false
                 // A new Media may select another audio track: do not reuse its old HDMI proof.
                 audioTrackFormat = null
                 appliedAudioPassthrough = false
@@ -896,9 +904,11 @@ fun VlcPlayerScreen(
                 externalSubtitleAttached = false
                 try {
                     val media = Media(libVlc, Uri.parse(url.withPlexToken(source.token)))
-                    // Respect the device decoder blacklist and allow LibVLC to
-                    // fall back to software decoding instead of crashing.
-                    media.setHWDecoderEnabled(true, false)
+                    val decoder = vlcDecoderConfiguration(decoderMode, softwareFallbackUsed)
+                    // A fresh Media must not retain its previous hardware option.
+                    // Keep native audio and subtitle decoders available.
+                    media.setHWDecoderEnabled(decoder.useHardware, false)
+                    decoder.mediaOptions.forEach(media::addOption)
                     media.addOption(":network-caching=${optimizationMode.cachingMs()}")
                     media.addOption(":file-caching=${optimizationMode.cachingMs()}")
                     media.addOption(":http-user-agent=Plex Play Universal/1.0")
@@ -1048,6 +1058,12 @@ fun VlcPlayerScreen(
                             }
                             applyPreferredSubtitleSelection()
                             updateTrackLists(player)
+                            if (pauseOnFirstPlaying) {
+                                pauseOnFirstPlaying = false
+                                resumePausedAfterRestart = false
+                                player.pause()
+                                isPlaying = false
+                            }
                         }
                         MediaPlayer.Event.Paused -> isPlaying = false
                         MediaPlayer.Event.TimeChanged -> {
@@ -1126,6 +1142,14 @@ fun VlcPlayerScreen(
                                     audioPassthroughFailed = true
                                     appliedAudioPassthrough = false
                                     runCatching { player.setAudioDigitalOutputEnabled(false) }
+                                    schedulePlaybackUrl(playbackUrls[playbackUrlIndex], resumeAt)
+                                } else if (shouldRetryVlcWithSoftware(decoderMode, softwareFallbackUsed)) {
+                                    // Generic error: this is not proof of a hardware fault.
+                                    // One software attempt per source, then bounded URL recovery.
+                                    softwareFallbackUsed = true
+                                    isBuffering = true
+                                    controlsVisible = true
+                                    errorMessage = "소프트웨어 디코더로 다시 연결합니다. 4K는 기기 성능에 따라 느릴 수 있습니다."
                                     schedulePlaybackUrl(playbackUrls[playbackUrlIndex], resumeAt)
                                 } else if (!recoverPlayback(resumeAt)) {
                                     restartingPlayback = false
@@ -1911,6 +1935,8 @@ fun VlcPlayerScreen(
             videoScale = videoScale,
             videoSettings = videoSettings,
             optimizationMode = optimizationMode,
+            decoderMode = decoderMode,
+            softwareFallbackUsed = softwareFallbackUsed,
             selectedVideoPreset = selectedVideoPreset,
             audioTracks = audioTracks,
             selectedAudioTrack = selectedAudioTrack,
@@ -2067,8 +2093,18 @@ fun VlcPlayerScreen(
             onOptimizationModeChanged = { mode ->
                 if (optimizationMode != mode) {
                     restorePositionMs = mediaPlayer?.time?.coerceAtLeast(0L) ?: positionMs
+                    resumePausedAfterRestart = resumePausedAfterRestart || (!isPlaying && !isBuffering)
                     optimizationMode = mode
                     preferences.edit().putString("device_optimization_mode", mode.storage).apply()
+                    rendererRevision++
+                }
+            },
+            onDecoderModeChanged = { mode ->
+                if (decoderMode != mode) {
+                    restorePositionMs = mediaPlayer?.time?.coerceAtLeast(0L) ?: positionMs
+                    resumePausedAfterRestart = resumePausedAfterRestart || (!isPlaying && !isBuffering)
+                    decoderMode = mode
+                    preferences.edit().putString("vlc_decoder_mode", mode.storage).apply()
                     rendererRevision++
                 }
             },
@@ -2103,6 +2139,8 @@ private fun VlcSettingsDialog(
     videoScale: VlcVideoScale,
     videoSettings: VlcVideoSettings,
     optimizationMode: VlcOptimizationMode,
+    decoderMode: VlcDecoderMode,
+    softwareFallbackUsed: Boolean,
     selectedVideoPreset: Int,
     audioTracks: List<VlcTrack>,
     selectedAudioTrack: Int,
@@ -2140,6 +2178,7 @@ private fun VlcSettingsDialog(
     onSaveVideoPreset: (Int) -> Unit,
     onLoadVideoPreset: (Int) -> Unit,
     onOptimizationModeChanged: (VlcOptimizationMode) -> Unit,
+    onDecoderModeChanged: (VlcDecoderMode) -> Unit,
     onAutoPlayNextChanged: (Boolean) -> Unit,
     onDraftStyleChanged: (VlcSubtitleStyle) -> Unit,
     onPickFont: () -> Unit,
@@ -2633,6 +2672,22 @@ private fun VlcSettingsDialog(
                     }
 
                     VlcSettingsPage.OPTIMIZATION -> {
+                        Text("비디오 디코더", color = Color.White)
+                        VlcDecoderMode.entries.forEach { mode ->
+                            VlcSelectionRow(
+                                label = mode.label,
+                                selected = decoderMode == mode,
+                                onClick = { onDecoderModeChanged(mode) },
+                            )
+                        }
+                        if (softwareFallbackUsed) {
+                            Text("현재 영상은 오류 후 소프트웨어 디코딩으로 재시도했습니다.", color = Color.LightGray)
+                        }
+                        Text(
+                            "소프트웨어 모드는 해상도를 낮추지 않지만 4K에서는 끊김·발열이 생길 수 있습니다. HDR·Dolby Vision 출력은 기기와 화면 지원이 필요합니다.",
+                            color = Color.LightGray,
+                        )
+                        Text("버퍼·성능", color = Color.White)
                         VlcOptimizationMode.entries.forEach { mode ->
                             VlcSelectionRow(
                                 label = "${mode.label} · ${mode.description}",

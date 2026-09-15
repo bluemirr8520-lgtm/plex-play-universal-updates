@@ -49,7 +49,7 @@ fun UniversalPlayerHost(
             ).directPlaybackSupported,
         )
     }
-    var engine by remember(source.url, playbackQuality) {
+    var engine by remember(source.playbackId, source.url, playbackQuality) {
         mutableStateOf(
             if (preferUniversalCodec) {
                 UniversalPlaybackEngine.VLC
@@ -58,11 +58,11 @@ fun UniversalPlayerHost(
             },
         )
     }
-    var fallbackPositionMs by remember(source.ratingKey) {
+    var fallbackPositionMs by remember(source.playbackId) {
         mutableLongStateOf(source.resumePositionMs)
     }
 
-    LaunchedEffect(source.url, playbackQuality, preferUniversalCodec) {
+    LaunchedEffect(source.playbackId, source.url, playbackQuality, preferUniversalCodec) {
         engine =
             if (preferUniversalCodec) {
                 UniversalPlaybackEngine.VLC

@@ -258,6 +258,8 @@ class PlexRepository(
                     partIndex = resolved.selectedPartIndex,
                 )
             }
+        val originalVideo = playbackUrl == directUrl
+        val video = resolved.videoStreamMetadata().forPlaybackOutput(originalVideo)
         return PlaybackSource(
             url = playbackUrl,
             serverBaseUrl = connection.baseUrl,
@@ -274,13 +276,17 @@ class PlexRepository(
             ratingKey = item.ratingKey,
             durationMs = resolved.durationMs.takeIf { it > 0 } ?: item.durationMs,
             resumePositionMs = item.viewOffsetMs,
-            videoCodec = resolved.videoCodec,
-            videoDynamicRange = resolved.videoDynamicRange,
-            videoProfile = resolved.videoProfile,
-            videoColorPrimaries = resolved.videoColorPrimaries,
-            videoColorTransfer = resolved.videoColorTransfer,
-            dolbyVisionProfile = resolved.dolbyVisionProfile,
-            audioCodec = resolved.audioCodec,
+            videoCodec = resolved.videoCodec.takeIf { originalVideo },
+            videoWidth = video.width,
+            videoHeight = video.height,
+            videoFrameRate = video.frameRate,
+            videoBitDepth = video.bitDepth,
+            videoDynamicRange = resolved.videoDynamicRange.takeIf { originalVideo },
+            videoProfile = resolved.videoProfile.takeIf { originalVideo },
+            videoColorPrimaries = resolved.videoColorPrimaries.takeIf { originalVideo },
+            videoColorTransfer = resolved.videoColorTransfer.takeIf { originalVideo },
+            dolbyVisionProfile = resolved.dolbyVisionProfile.takeIf { originalVideo },
+            audioCodec = resolved.audioCodec.takeIf { originalVideo },
             subtitles = resolved.subtitles
                 .forSelectedPart(resolved.partKey)
                 .mapNotNull { subtitle ->
