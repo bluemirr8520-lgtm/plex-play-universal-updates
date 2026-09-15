@@ -3241,29 +3241,6 @@ private fun displaySubtitleTrackLabel(sourceLabel: String): String =
 private fun PlaybackSubtitle.normalizedCodec(): String =
     codec?.trim()?.lowercase(Locale.ROOT).orEmpty()
 
-internal fun PlaybackSubtitle.isManualTextSubtitle(): Boolean {
-    val normalizedCodec = normalizedCodec()
-    val normalizedMimeType = mimeType.lowercase(Locale.ROOT)
-    return normalizedCodec in setOf(
-        "srt",
-        "subrip",
-        "ass",
-        "ssa",
-        "vtt",
-        "webvtt",
-        "ttml",
-        "smi",
-        "sami",
-        "mov_text",
-        "tx3g",
-        "ttxt",
-        "text",
-    ) ||
-        normalizedMimeType.contains("subrip") ||
-        normalizedMimeType.contains("ssa") ||
-        normalizedMimeType.contains("vtt") ||
-        normalizedMimeType.contains("ttml")
-}
 
 private fun PlaybackSubtitle.isExoSidecarSubtitle(): Boolean =
     normalizedCodec() !in setOf("smi", "sami")

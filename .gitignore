@@ -9,3 +9,13 @@
 .externalNativeBuild
 .cxx
 app/build
+*.jks
+*.keystore
+*.p12
+*.apk
+*.aab
+.env
+.env.*
+!.env.example
+/app/libs/*.aar
+/app/libs/*-sources.jar

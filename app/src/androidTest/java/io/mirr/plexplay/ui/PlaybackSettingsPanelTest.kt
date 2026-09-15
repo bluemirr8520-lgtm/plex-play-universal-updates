@@ -31,6 +31,7 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -111,7 +112,7 @@ class PlaybackSettingsPanelTest {
     }
 
     @Test
-    fun dpadAndTabStayInsideThePanelAtBothEnds() {
+    fun dpadAndTabStayInsideThePanelAtBothEnds() = withKeyboardInput {
         compose.setContent {
             MaterialTheme {
                 Box(Modifier.fillMaxSize()) {
@@ -189,7 +190,7 @@ class PlaybackSettingsPanelTest {
     }
 
     @Test
-    fun mediaKeysAreConsumedAndOnlyAPairedUncancelledEscapeDismisses() {
+    fun mediaKeysAreConsumedAndOnlyAPairedUncancelledEscapeDismisses() = withKeyboardInput {
         var escapedKeyEvents = 0
         var dismissals = 0
         compose.setContent {
@@ -266,5 +267,24 @@ class PlaybackSettingsPanelTest {
         compose.onNodeWithTag("close").assertIsDisplayed()
         compose.onNodeWithTag("option_39").performScrollTo().assertIsDisplayed()
         compose.onNodeWithTag("close").assertIsDisplayed()
+    }
+
+    private fun withKeyboardInput(block: () -> Unit) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        var wasInTouchMode = true
+        compose.runOnUiThread {
+            wasInTouchMode = compose.activity.window.decorView.isInTouchMode
+        }
+        // Compose buttons use SystemDefined focusability: they cannot take focus in touch
+        // mode. Establish the keyboard/remote fixture before mounting the panel, without
+        // focusing a child and thereby bypassing the panel's own initial-focus behavior.
+        instrumentation.setInTouchMode(false)
+        instrumentation.waitForIdleSync()
+        try {
+            block()
+        } finally {
+            instrumentation.setInTouchMode(wasInTouchMode)
+            instrumentation.waitForIdleSync()
+        }
     }
 }

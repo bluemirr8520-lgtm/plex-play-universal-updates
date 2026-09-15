@@ -20,8 +20,10 @@ internal data class DevicePlaybackCompatibility(
 internal fun shouldPreferUniversalCodec(
     playbackQuality: PlaybackQuality,
     directPlaybackSupported: Boolean,
+    audioCodec: String? = null,
 ): Boolean =
-    playbackQuality == PlaybackQuality.ORIGINAL && !directPlaybackSupported
+    playbackQuality == PlaybackQuality.ORIGINAL &&
+        (!directPlaybackSupported || isVlcTrueHdAudioCodec(audioCodec))
 
 private enum class VideoDynamicRange(
     val label: String,

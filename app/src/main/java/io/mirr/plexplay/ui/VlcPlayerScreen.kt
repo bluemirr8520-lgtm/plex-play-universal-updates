@@ -9,6 +9,8 @@ import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.media.AudioManager
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -95,6 +97,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -123,6 +126,31 @@ private data class VlcTrack(
     val id: Int,
     val name: String,
 )
+
+private data class VlcAudioTrackFormat(
+    val codec: String?,
+    val channels: Int,
+    val sampleRate: Int,
+)
+
+private fun readVlcAudioTrackFormat(player: MediaPlayer): VlcAudioTrackFormat? = runCatching {
+    val selectedId = player.audioTrack
+    if (selectedId < 0) return@runCatching null
+    val media = player.media ?: return@runCatching null
+    try {
+        val track = (0 until media.trackCount)
+            .mapNotNull { media.getTrack(it) as? IMedia.AudioTrack }
+            .firstOrNull { it.id == selectedId } ?: return@runCatching null
+        VlcAudioTrackFormat(
+            codec = if (track.fourcc == 0x64687274) "truehd"
+                else track.originalCodec.takeIf { isVlcTrueHdAudioCodec(it) } ?: track.codec,
+            channels = track.channels,
+            sampleRate = track.rate,
+        )
+    } finally {
+        media.release()
+    }
+}.getOrNull()
 
 private enum class VlcSettingsPage(
     val title: String,
@@ -375,7 +403,6 @@ fun VlcPlayerScreen(
     }
     var draftSubtitleStyle by remember { mutableStateOf(subtitleStyle) }
     var rendererRevision by remember { mutableIntStateOf(0) }
-    var nativeSubtitleStyleApplyRevision by remember { mutableIntStateOf(0) }
     var videoLayout by remember { mutableStateOf<VLCVideoLayout?>(null) }
     var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
     var controlsVisible by remember { mutableStateOf(false) }
@@ -425,6 +452,29 @@ fun VlcPlayerScreen(
     var defaultAudioTrack by remember(source.ratingKey) { mutableIntStateOf(-1) }
     var automaticAudioSelection by remember(source.ratingKey) { mutableStateOf(true) }
     var preferredAudioTrack by remember(source.ratingKey) { mutableStateOf<Int?>(null) }
+    var audioOutputMode by remember { mutableStateOf(loadVlcAudioOutputMode(context)) }
+    var audioTrackFormat by remember(source.url) { mutableStateOf<VlcAudioTrackFormat?>(null) }
+    var audioRouteRevision by remember { mutableIntStateOf(0) }
+    var audioPassthroughFailed by remember(source.url) { mutableStateOf(false) }
+    var appliedAudioPassthrough by remember(source.url) { mutableStateOf(false) }
+    val audioOutputDecision = remember(
+        audioOutputMode, audioTrackFormat, source.audioCodec,
+        audioRouteRevision, audioPassthroughFailed, playbackSpeed,
+    ) {
+        when {
+            audioPassthroughFailed -> VlcAudioOutputDecision(
+                false, "PCM · 호환 출력", "디지털 출력 실패로 PCM을 사용합니다.",
+            )
+            kotlin.math.abs(playbackSpeed - 1f) > .001f -> VlcAudioOutputDecision(
+                false, "PCM · 배속 재생", "배속 조절 중에는 앱에서 오디오를 해독합니다.",
+            )
+            else -> detectVlcAudioOutput(
+                context, audioOutputMode,
+                audioTrackFormat?.codec ?: source.audioCodec,
+                audioTrackFormat?.channels, audioTrackFormat?.sampleRate,
+            )
+        }
+    }
     var selectedSubtitleTrack by remember { mutableIntStateOf(-1) }
     var subtitlesDisabled by remember(source.ratingKey) { mutableStateOf(false) }
     var preferredSubtitleTrack by remember(source.ratingKey) { mutableStateOf<Int?>(null) }
@@ -454,19 +504,73 @@ fun VlcPlayerScreen(
     val latestOnPlaybackCompleted by rememberUpdatedState(onPlaybackCompleted)
     val latestOnProgress by rememberUpdatedState(onProgress)
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    val latestPlaybackSpeed by rememberUpdatedState(playbackSpeed)
+
+    DisposableEffect(audioManager) {
+        val callback = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
+                audioRouteRevision++
+            }
+            override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+                audioRouteRevision++
+            }
+        }
+        val registered = runCatching {
+            audioManager.registerAudioDeviceCallback(callback, mainHandler)
+        }.isSuccess
+        onDispose {
+            if (registered) runCatching { audioManager.unregisterAudioDeviceCallback(callback) }
+        }
+    }
+
+    LaunchedEffect(audioOutputMode, audioTrackFormat) {
+        if (audioOutputMode != VlcAudioOutputMode.PCM && audioTrackFormat != null) {
+            // A user can switch between already-connected outputs without a device callback.
+            while (true) {
+                delay(2_000L)
+                if (isPlaying || settingsVisible) audioRouteRevision++
+            }
+        }
+    }
+
+    LaunchedEffect(
+        mediaPlayer, audioOutputDecision.passthrough, playbackSpeed,
+        audioTrackFormat, appliedAudioPassthrough,
+    ) {
+        val player = mediaPlayer ?: return@LaunchedEffect
+        val requested = audioOutputDecision.passthrough
+        if (requested != appliedAudioPassthrough) {
+            val accepted = runCatching { player.setAudioDigitalOutputEnabled(requested) }
+                .getOrDefault(false)
+            if (accepted) {
+                appliedAudioPassthrough = requested
+            } else {
+                runCatching { player.setAudioDigitalOutputEnabled(false) }
+                appliedAudioPassthrough = false
+                audioPassthroughFailed = true
+            }
+        }
+        runCatching { player.rate = playbackSpeed }
+    }
     val customFontFile = remember { File(context.filesDir, "custom_subtitle_font") }
     var customFontRevision by remember { mutableIntStateOf(0) }
-    var styledSubtitleCues by remember(source.ratingKey) {
+    val selectedAppTextSubtitle = selectedPlexSubtitle
+        ?.takeUnless { subtitlesDisabled }
+        ?.takeIf { it.isManualTextSubtitle() }
+    // A new selection must never inherit another sidecar's cues, loading
+    // result, or renderer ownership, even when the two URLs happen to match.
+    var styledSubtitleCues by remember(source.ratingKey, selectedAppTextSubtitle) {
         mutableStateOf<List<ManualSubtitleCue>?>(null)
     }
-    var styledSubtitleSourceUrl by remember(source.ratingKey) { mutableStateOf<String?>(null) }
-    var styledSubtitleText by remember(source.ratingKey) { mutableStateOf("") }
-    var styledSubtitleLoading by remember(source.ratingKey) { mutableStateOf(false) }
-    var styledSubtitleLoadFailed by remember(source.ratingKey) { mutableStateOf(false) }
-    val selectedAppTextSubtitle = selectedPlexSubtitle?.takeIf { it.isManualTextSubtitle() }
+    var styledSubtitleText by remember(source.ratingKey, selectedAppTextSubtitle) { mutableStateOf("") }
+    var styledSubtitleLoading by remember(source.ratingKey, selectedAppTextSubtitle) {
+        mutableStateOf(selectedAppTextSubtitle != null)
+    }
+    var styledSubtitleLoadFailed by remember(source.ratingKey, selectedAppTextSubtitle) {
+        mutableStateOf(false)
+    }
     val useStyledSubtitleOverlay =
-        selectedAppTextSubtitle != null &&
-            styledSubtitleSourceUrl == selectedAppTextSubtitle.url &&
+        !subtitlesDisabled && selectedAppTextSubtitle != null &&
             !styledSubtitleCues.isNullOrEmpty()
     val automaticSubtitleSelection = !subtitlesDisabled &&
         preferredSubtitleTrack == null &&
@@ -474,8 +578,8 @@ fun VlcPlayerScreen(
     val preferredNativeTrackName = preferredSubtitleTrack?.let { preferredId ->
         subtitleTracks.firstOrNull { it.id == preferredId }?.name
     }
-    // Keep Media3 as a subtitle-only companion while the direct text loader is
-    // pending/failed or when a LibVLC-discovered track was selected. Video and
+    // Use Media3 as a subtitle-only companion after the direct loader fails
+    // or when a LibVLC-discovered track was selected. Video and
     // audio renderers are disabled inside the bridge, so VLC remains the sole
     // A/V decoder.
     val subtitleBridgeEnabled = !subtitlesDisabled &&
@@ -497,15 +601,17 @@ fun VlcPlayerScreen(
     )
     val useCompanionSubtitleOverlay = subtitleBridgeEnabled && subtitleBridge.active
     val useAppSubtitleOverlay = useStyledSubtitleOverlay || useCompanionSubtitleOverlay
-    val appSubtitleOwnsSelection = useStyledSubtitleOverlay ||
-        (
-            subtitleBridgeEnabled &&
-                (
-                    subtitleBridge.active ||
-                        subtitleBridge.status == UniversalSubtitleBridgeStatus.PREPARING
-                    ) &&
-                !subtitleBridge.bitmapOnly
-            )
+    val appSubtitleOwnsSelection = appOwnsVlcSubtitleSelection(
+        disabled = subtitlesDisabled,
+        textSelected = selectedAppTextSubtitle != null,
+        externalTextSelected = selectedAppTextSubtitle?.isEmbedded == false,
+        directLoadFailed = styledSubtitleLoadFailed,
+        directOverlayActive = useStyledSubtitleOverlay,
+        bridgeEnabled = subtitleBridgeEnabled,
+        bridgeActive = subtitleBridge.active,
+        bridgePreparing = subtitleBridge.status == UniversalSubtitleBridgeStatus.PREPARING,
+        bridgeBitmapOnly = subtitleBridge.bitmapOnly,
+    )
     val appSubtitleText = if (useStyledSubtitleOverlay) {
         styledSubtitleText
     } else {
@@ -515,10 +621,13 @@ fun VlcPlayerScreen(
         subtitlesDisabled -> null
         useStyledSubtitleOverlay -> "사용자 자막 적용됨 · 자막 파일 직접 읽기"
         useCompanionSubtitleOverlay -> "사용자 자막 적용됨 · 원본 텍스트 트랙"
+        styledSubtitleLoading -> "사용자 자막 준비 중… · 영상은 계속 재생됩니다"
         subtitleBridgeEnabled &&
             subtitleBridge.status == UniversalSubtitleBridgeStatus.PREPARING ->
             "사용자 자막 준비 중…"
         subtitleBridge.bitmapOnly -> "이미지 자막 · 글꼴/색상 변경 불가"
+        selectedAppTextSubtitle?.isEmbedded == false && styledSubtitleLoadFailed ->
+            "외부 자막을 읽지 못했습니다 · 다른 자막을 선택해 주세요"
         subtitleBridgeEnabled &&
             subtitleBridge.status in setOf(
                 UniversalSubtitleBridgeStatus.NO_TEXT_TRACKS,
@@ -530,7 +639,8 @@ fun VlcPlayerScreen(
         else -> null
     }
     val subtitleRendererLimited = subtitleRendererStatus?.contains("제한") == true ||
-        subtitleRendererStatus?.contains("변경 불가") == true
+        subtitleRendererStatus?.contains("변경 불가") == true ||
+        subtitleRendererStatus?.contains("읽지 못했습니다") == true
     val latestSubtitlesDisabled by rememberUpdatedState(subtitlesDisabled)
     val latestSelectedExternalSubtitleUrl by rememberUpdatedState(selectedExternalSubtitleUrl)
     val latestSelectedAppTextSubtitle by rememberUpdatedState(selectedAppTextSubtitle)
@@ -560,13 +670,9 @@ fun VlcPlayerScreen(
         draftSubtitleStyle = resolved
         subtitleStyle = resolved
         preferences.saveVlcSubtitleStyle(resolved)
-        // The app-side text overlay is recomposed from subtitleStyle, so it is
-        // already updated without touching playback. Native VLC subtitle
-        // options require a new renderer; request a debounced restart instead
-        // of restarting for every intermediate slider position.
-        if (!appSubtitleOwnsSelection && !subtitlesDisabled) {
-            nativeSubtitleStyleApplyRevision++
-        }
+        // App-rendered text updates immediately. Never tear down a running
+        // 4K decoder for a font, color, size, or position change. Bitmap/native
+        // fallback tracks explicitly report their styling limitations.
     }
 
     val fontPicker = rememberLauncherForActivityResult(
@@ -609,11 +715,24 @@ fun VlcPlayerScreen(
     }
 
     fun updateTrackLists(player: MediaPlayer) {
+        audioTrackFormat = readVlcAudioTrackFormat(player)
         audioTracks = player.audioTracks.orEmpty().map { VlcTrack(it.id, it.name) }
         subtitleTracks = player.spuTracks.orEmpty().map { VlcTrack(it.id, it.name) }
         selectedAudioTrack = player.audioTrack
         if (defaultAudioTrack < 0 && player.audioTrack >= 0) defaultAudioTrack = player.audioTrack
         selectedSubtitleTrack = player.spuTrack
+    }
+
+    fun prepareAudioTrackChange(player: MediaPlayer): Boolean {
+        if (appliedAudioPassthrough &&
+            !runCatching { player.setAudioDigitalOutputEnabled(false) }.getOrDefault(false)
+        ) {
+            errorMessage = "오디오 출력을 변경하지 못했습니다. 잠시 후 다시 시도해 주세요."
+            return false
+        }
+        appliedAudioPassthrough = false
+        audioTrackFormat = null
+        return true
     }
 
     fun showGestureFeedback(message: String) {
@@ -623,6 +742,7 @@ fun VlcPlayerScreen(
     }
 
     fun openSettings(page: VlcSettingsPage = VlcSettingsPage.MAIN) {
+        audioRouteRevision++
         controlsVisible = false
         settingsPage = page
         settingsVisible = true
@@ -729,7 +849,12 @@ fun VlcPlayerScreen(
                 return@DisposableEffect onDispose { }
             }
             val player = try {
-                MediaPlayer(libVlc)
+                MediaPlayer(libVlc).also {
+                    // Use Android's routed output. Never force unknown HDMI encodings.
+                    runCatching { it.setAudioOutput("android_audiotrack") }
+                    runCatching { it.setAudioDigitalOutputEnabled(false) }
+                    appliedAudioPassthrough = false
+                }
             } catch (error: Throwable) {
                 Log.e("PlexPlayUniversal", "VLC player creation failed", error)
                 runCatching { libVlc.release() }
@@ -759,6 +884,10 @@ fun VlcPlayerScreen(
             var disposed = false
 
             fun startPlaybackUrl(url: String, resumeAtMs: Long) {
+                // A new Media may select another audio track: do not reuse its old HDMI proof.
+                audioTrackFormat = null
+                appliedAudioPassthrough = false
+                runCatching { player.setAudioDigitalOutputEnabled(false) }
                 pendingSeek = resumeAtMs.coerceAtLeast(0L)
                 recoveryAnchorMs = pendingSeek
                 playbackStartPositionMs = pendingSeek
@@ -891,7 +1020,7 @@ fun VlcPlayerScreen(
                             playbackObservedPlaying = true
                             isPlaying = true
                             isBuffering = false
-                            player.rate = playbackSpeed
+                            player.rate = latestPlaybackSpeed
                             if (pendingSeek > 0L) {
                                 player.setTime(pendingSeek, true)
                                 pendingSeek = 0L
@@ -899,6 +1028,7 @@ fun VlcPlayerScreen(
                             updateTrackLists(player)
                             latestSelectedExternalSubtitleUrl
                                 ?.takeIf { latestSelectedAppTextSubtitle?.isEmbedded != true }
+                                ?.takeUnless { latestSubtitlesDisabled }
                                 ?.takeUnless { latestAppSubtitleOwnsSelection }
                                 ?.let { subtitleUrl ->
                                 if (!externalSubtitleAttached) {
@@ -910,7 +1040,11 @@ fun VlcPlayerScreen(
                                 }
                             }
                             if (!automaticAudioSelection) {
-                                preferredAudioTrack?.let { player.setAudioTrack(it) }
+                                preferredAudioTrack?.let { target ->
+                                    if (player.audioTrack != target && prepareAudioTrackChange(player)) {
+                                        player.setAudioTrack(target)
+                                    }
+                                }
                             }
                             applyPreferredSubtitleSelection()
                             updateTrackLists(player)
@@ -987,7 +1121,13 @@ fun VlcPlayerScreen(
                             isPlaying = false
                             if (!restartingPlayback) {
                                 val resumeAt = player.time.coerceAtLeast(positionMs).coerceAtLeast(0L)
-                                if (!recoverPlayback(resumeAt)) {
+                                if (appliedAudioPassthrough && !audioPassthroughFailed) {
+                                    // Retry this source once as PCM, without changing saved mode.
+                                    audioPassthroughFailed = true
+                                    appliedAudioPassthrough = false
+                                    runCatching { player.setAudioDigitalOutputEnabled(false) }
+                                    schedulePlaybackUrl(playbackUrls[playbackUrlIndex], resumeAt)
+                                } else if (!recoverPlayback(resumeAt)) {
                                     restartingPlayback = false
                                     isBuffering = false
                                     controlsVisible = true
@@ -1018,10 +1158,9 @@ fun VlcPlayerScreen(
         }
     }
 
-    LaunchedEffect(source.ratingKey, selectedAppTextSubtitle?.url) {
+    LaunchedEffect(source.ratingKey, selectedAppTextSubtitle) {
         styledSubtitleText = ""
         styledSubtitleCues = null
-        styledSubtitleSourceUrl = null
         styledSubtitleLoadFailed = false
         val subtitle = selectedAppTextSubtitle ?: run {
             styledSubtitleLoading = false
@@ -1036,11 +1175,9 @@ fun VlcPlayerScreen(
             emptyList()
         }
         if (cues.isNotEmpty()) {
-            styledSubtitleSourceUrl = subtitle.url
             styledSubtitleCues = cues
-            // Keep playback running. If VLC attached the same subtitle while
-            // it was loading, hide that native track and let the shared styled
-            // overlay become the single subtitle renderer.
+            // Keep playback running and keep the native renderer disabled;
+            // the selected text track belongs to the shared styled overlay.
             mediaPlayer?.setSpuTrack(-1)
             selectedSubtitleTrack = -1
             styledSubtitleLoading = false
@@ -1055,8 +1192,8 @@ fun VlcPlayerScreen(
             styledSubtitleLoadFailed = true
             // Do not silently switch to VLC here. The subtitle-only Media3
             // bridge now gets a chance to read the same sidecar or demux the
-            // original container. Native VLC is used only after that path has
-            // explicitly reported that no styled text track is available.
+            // original container. Only embedded tracks may use native fallback
+            // after that path reports no styled text track is available.
         }
     }
 
@@ -1077,6 +1214,14 @@ fun VlcPlayerScreen(
         if (!requiresNativeFallback) return@LaunchedEffect
 
         val subtitle = selectedPlexSubtitle
+        // An external text selection must not silently become native text:
+        // LibVLC cannot apply the selected custom Typeface to that renderer.
+        // Preserve the selection and show the explicit read failure instead.
+        if (subtitle?.isEmbedded == false && subtitle.isManualTextSubtitle()) {
+            mediaPlayer?.setSpuTrack(-1)
+            selectedSubtitleTrack = -1
+            return@LaunchedEffect
+        }
         if (subtitle != null && !subtitle.isEmbedded) {
             val attached = mediaPlayer?.addSlave(
                 IMedia.Slave.Type.Subtitle,
@@ -1105,18 +1250,6 @@ fun VlcPlayerScreen(
             selectedSubtitleTrack = -1
         } else if (appSubtitleOwnsSelection) {
             mediaPlayer?.setSpuTrack(-1)
-        }
-    }
-
-    LaunchedEffect(nativeSubtitleStyleApplyRevision) {
-        if (nativeSubtitleStyleApplyRevision <= 0) return@LaunchedEffect
-        // Slider/key repeats can emit many values. Saving and app-side overlay
-        // updates remain immediate, while native VLC is recreated only once
-        // after the latest change settles.
-        delay(500)
-        if (!latestAppSubtitleOwnsSelection && !latestSubtitlesDisabled) {
-            restorePositionMs = mediaPlayer?.time?.coerceAtLeast(0L) ?: positionMs
-            rendererRevision++
         }
     }
 
@@ -1782,6 +1915,8 @@ fun VlcPlayerScreen(
             audioTracks = audioTracks,
             selectedAudioTrack = selectedAudioTrack,
             automaticAudioSelection = automaticAudioSelection,
+            audioOutputMode = audioOutputMode,
+            audioOutputStatus = audioOutputDecision.label + " · " + audioOutputDecision.reason,
             subtitleTracks = subtitleTracks.filterNot { track ->
                 plexSubtitleChoices.bestPlexTextSubtitleMatch(track.name) != null
             },
@@ -1789,6 +1924,7 @@ fun VlcPlayerScreen(
             subtitlesDisabled = subtitlesDisabled,
             automaticSubtitleSelection = automaticSubtitleSelection,
             selectedExternalSubtitleUrl = selectedExternalSubtitleUrl,
+            selectedPlexSubtitleId = selectedPlexSubtitleId,
             plexSubtitleChoices = plexSubtitleChoices,
             styledSubtitleLoading = styledSubtitleLoading,
             styledSubtitleLoadFailed = styledSubtitleLoadFailed,
@@ -1799,20 +1935,32 @@ fun VlcPlayerScreen(
             customFontName = preferences.getString("custom_subtitle_font_name", null),
             onPageChanged = { settingsPage = it },
             onAudioTrack = { id ->
-                automaticAudioSelection = false
-                preferredAudioTrack = id
-                mediaPlayer?.setAudioTrack(id)
-                selectedAudioTrack = id
+                mediaPlayer?.let { player ->
+                    if (prepareAudioTrackChange(player) && player.setAudioTrack(id)) {
+                        automaticAudioSelection = false
+                        preferredAudioTrack = id
+                        selectedAudioTrack = id
+                    }
+                }
             },
             onAudioAuto = {
-                automaticAudioSelection = true
-                preferredAudioTrack = null
                 val target = defaultAudioTrack.takeIf { it >= 0 }
-                    ?: audioTracks.firstOrNull()?.id
+                    ?: audioTracks.firstOrNull { it.id >= 0 }?.id
                 if (target != null) {
-                    mediaPlayer?.setAudioTrack(target)
-                    selectedAudioTrack = target
+                    mediaPlayer?.let { player ->
+                        if (prepareAudioTrackChange(player) && player.setAudioTrack(target)) {
+                            automaticAudioSelection = true
+                            preferredAudioTrack = null
+                            selectedAudioTrack = target
+                        }
+                    }
                 }
+            },
+            onAudioOutputModeChanged = { mode ->
+                audioOutputMode = mode
+                saveVlcAudioOutputMode(context, mode)
+                audioPassthroughFailed = false
+                audioRouteRevision++
             },
             onSubtitleOff = {
                 subtitlesDisabled = true
@@ -1959,11 +2107,14 @@ private fun VlcSettingsDialog(
     audioTracks: List<VlcTrack>,
     selectedAudioTrack: Int,
     automaticAudioSelection: Boolean,
+    audioOutputMode: VlcAudioOutputMode,
+    audioOutputStatus: String,
     subtitleTracks: List<VlcTrack>,
     selectedSubtitleTrack: Int,
     subtitlesDisabled: Boolean,
     automaticSubtitleSelection: Boolean,
     selectedExternalSubtitleUrl: String?,
+    selectedPlexSubtitleId: String?,
     plexSubtitleChoices: List<io.mirr.plexplay.data.PlaybackSubtitle>,
     styledSubtitleLoading: Boolean,
     styledSubtitleLoadFailed: Boolean,
@@ -1975,6 +2126,7 @@ private fun VlcSettingsDialog(
     onPageChanged: (VlcSettingsPage) -> Unit,
     onAudioTrack: (Int) -> Unit,
     onAudioAuto: () -> Unit,
+    onAudioOutputModeChanged: (VlcAudioOutputMode) -> Unit,
     onSubtitleOff: () -> Unit,
     onSubtitleAuto: () -> Unit,
     onSubtitleTrack: (Int) -> Unit,
@@ -2129,7 +2281,7 @@ private fun VlcSettingsDialog(
                                     else ->
                                         "외부 이미지/원본 · ${subtitle.label} · 사용자 글꼴 제한"
                                 },
-                                selected = selectedExternalSubtitleUrl == subtitle.url,
+                                selected = !subtitlesDisabled && selectedPlexSubtitleId == subtitle.stableId,
                                 onClick = { onExternalSubtitle(subtitle) },
                             )
                         }
@@ -2139,7 +2291,14 @@ private fun VlcSettingsDialog(
                             subtitleRendererLimited
                         ) {
                             Text(
-                                "텍스트 추출과 보조 자막 읽기에 실패해 VLC 원본 표시로 전환했습니다.",
+                                if (plexSubtitleChoices.firstOrNull {
+                                        it.stableId == selectedPlexSubtitleId
+                                    }?.isEmbedded == false
+                                ) {
+                                    "외부 텍스트 자막을 읽지 못했습니다. 다른 자막을 선택해 주세요. 영상은 계속 재생됩니다."
+                                } else {
+                                    "텍스트 추출과 보조 자막 읽기에 실패해 VLC 원본 표시로 전환했습니다."
+                                },
                                 color = Color(0xFFFFB74D),
                             )
                         } else if (styledSubtitleLoading && subtitleRendererStatus == null) {
@@ -2428,6 +2587,21 @@ private fun VlcSettingsDialog(
                     }
 
                     VlcSettingsPage.AUDIO -> {
+                        Text("오디오 출력", color = Color(0xFFE5A00D), fontWeight = FontWeight.Bold)
+                        VlcAudioOutputMode.entries.forEach { mode ->
+                            VlcSelectionRow(
+                                label = mode.label,
+                                selected = audioOutputMode == mode,
+                                onClick = { onAudioOutputModeChanged(mode) },
+                            )
+                        }
+                        Text(audioOutputStatus, color = Color.LightGray)
+                        Text(
+                            "설정은 자동 저장됩니다. PCM에서는 기기에 맞게 채널이 출력되며, Atmos 원음 전달은 지원 장비가 필요합니다.",
+                            color = Color.LightGray,
+                            fontSize = 12.sp,
+                        )
+                        Text("오디오 트랙", color = Color(0xFFE5A00D), fontWeight = FontWeight.Bold)
                         VlcSelectionRow(
                             label = "자동 · 원본 기본 오디오",
                             selected = automaticAudioSelection,

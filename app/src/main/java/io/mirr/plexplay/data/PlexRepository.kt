@@ -209,12 +209,7 @@ class PlexRepository(
         api().removeFromContinueWatching(item.ratingKey)
 
     suspend fun children(item: PlexItem): List<PlexItem> {
-        val path = when {
-            item.key.endsWith("/children") -> item.key
-            item.key.isNotBlank() -> "${item.key}/children"
-            else -> "/library/metadata/${item.ratingKey}/children"
-        }
-        return api().children(path)
+        return visibleSeriesChildren(item, api().children(plexChildrenPath(item)))
     }
 
     suspend fun hasChildren(item: PlexItem): Boolean = children(item).isNotEmpty()

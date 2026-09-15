@@ -9,6 +9,19 @@ import org.junit.Test
 
 class MediaCompatibilityTest {
     @Test
+    fun trueHdUsesLocalVlcEvenWhenPlatformAdvertisesDirectOutput() {
+        listOf("truehd", "True-HD", "A_TRUEHD", "mlpfb", "audio/true-hd").forEach {
+            assertTrue(shouldPreferUniversalCodec(PlaybackQuality.ORIGINAL, true, it))
+        }
+    }
+
+    @Test
+    fun trueHdDoesNotOverrideUserSelectedQualityConversion() {
+        assertFalse(shouldPreferUniversalCodec(PlaybackQuality.HD_1080, true, "truehd"))
+        assertFalse(shouldPreferUniversalCodec(PlaybackQuality.ORIGINAL, true, "eac3"))
+    }
+
+    @Test
     fun originalUncertainMediaStartsWithUniversalCodec() {
         assertTrue(
             shouldPreferUniversalCodec(

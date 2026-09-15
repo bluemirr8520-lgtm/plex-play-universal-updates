@@ -2,24 +2,20 @@ name: Build and release Plex Play Universal
 
 on:
   workflow_dispatch:
-    inputs:
-      source_tag:
-        description: LibVLC asset release tag
-        required: true
-        default: source-v1.0.10
 
 permissions:
   contents: write
 
 concurrency:
-  group: plex-play-universal-v1.0.16-release
+  group: plex-play-universal-main-release
   cancel-in-progress: false
 
 env:
-  UNIVERSAL_TAG: v1.0.16
-  UNIVERSAL_VERSION: 1.0.16
-  UNIVERSAL_VERSION_CODE: "17"
-  EXPECTED_UNIT_TESTS: "93"
+  UNIVERSAL_TAG: v1.0.19
+  UNIVERSAL_VERSION: 1.0.19
+  UNIVERSAL_VERSION_CODE: "20"
+  EXPECTED_UNIT_TESTS: "161"
+  LIBVLC_SOURCE_TAG: source-v1.0.10
   EXPECTED_CERT_SHA256: 74c178f3841343954e4a6c74223c4ef06df5cef270485c557d4f915f389845e2
   EXPECTED_LIBVLC_SHA256: 2c25507adb1260aa4d81aad8c2ce98765d98026b9381f49ea454d0b8092f21cb
 
@@ -29,41 +25,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Check out release source
+      - name: Check out the committed release source
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           path: source
           fetch-depth: 0
 
-      - name: Require the current main HEAD
+      - name: Require the current main HEAD and unmodified committed source
         id: source_head
         run: |
           set -euo pipefail
           git -C source fetch --no-tags origin main
           checkout_commit="$(git -C source rev-parse HEAD)"
           remote_commit="$(git -C source rev-parse origin/main)"
+          test "$checkout_commit" = "$GITHUB_SHA"
           test "$checkout_commit" = "$remote_commit"
+          git -C source diff --exit-code HEAD --
           printf 'commit=%s\n' "$checkout_commit" >> "$GITHUB_OUTPUT"
 
-      - name: Refuse an existing release tag
+      - name: Refuse any existing release or tag
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          release_response="$(mktemp "$RUNNER_TEMP/release-check.XXXXXX")"
-          if gh api --include "repos/$GITHUB_REPOSITORY/releases/tags/$UNIVERSAL_TAG" \
-            > "$release_response" 2>/dev/null; then
-            rm -f "$release_response"
-            echo "::error::Release $UNIVERSAL_TAG already exists; refusing to overwrite it."
-            exit 1
-          else
-            release_status="$(awk 'NR == 1 && /^HTTP\// {print $2; exit}' "$release_response")"
-            rm -f "$release_response"
-            if [ "$release_status" != "404" ]; then
-              echo "::error::Unable to confirm that the release is absent; refusing to continue."
-              exit 1
-            fi
-          fi
+          # Listing authenticated releases also catches unpublished drafts.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+            jq -s -e --arg tag "$UNIVERSAL_TAG" \
+              '[.[][] | select(.tag_name == $tag)] | length == 0'
           if git -C source ls-remote --exit-code --tags origin \
             "refs/tags/$UNIVERSAL_TAG" >/dev/null 2>&1; then
             echo "::error::Git tag $UNIVERSAL_TAG already exists; refusing to reuse it."
@@ -71,10 +60,37 @@ jobs:
           else
             tag_status=$?
             if [ "$tag_status" -ne 2 ]; then
-              echo "::error::Unable to confirm that the Git tag is absent; refusing to continue."
+              echo "::error::Unable to confirm that the Git tag is absent."
               exit 1
             fi
           fi
+
+      - name: Verify checked-in version and release documentation
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          build = Path("source/app/build.gradle.kts").read_text(encoding="utf-8")
+          version = re.escape(os.environ["UNIVERSAL_VERSION"])
+          code = re.escape(os.environ["UNIVERSAL_VERSION_CODE"])
+          assert re.search(r'(?m)^\s*applicationId\s*=\s*"io\.mirr\.plexplay\.universal"\s*$', build)
+          assert re.search(rf'(?m)^\s*versionCode\s*=\s*{code}\s*$', build)
+          assert re.search(rf'(?m)^\s*versionName\s*=\s*"{version}"\s*$', build)
+          for required in (
+              "README.md",
+              "USER_GUIDE.md",
+              f"BUILD_VERIFICATION_{os.environ['UNIVERSAL_VERSION']}.md",
+              f"RELEASE_NOTES_{os.environ['UNIVERSAL_TAG']}.md",
+              "app/src/androidTest/java/io/mirr/plexplay/ui/PlaybackSettingsPanelTest.kt",
+          ):
+              path = Path("source") / required
+              assert path.is_file() and path.stat().st_size > 0, required
+          PY
+          # Build this commit directly; never apply an embedded snapshot or commit generated code.
+          git -C source diff --exit-code HEAD --
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -98,8 +114,6 @@ jobs:
           umask 077
           printf '%s' "$KEYSTORE_B64" | base64 --decode > "$key_path"
           test -s "$key_path"
-          mkdir -p "$HOME/.android"
-          install -m 600 "$key_path" "$HOME/.android/debug.keystore"
           {
             printf 'PLEX_RELEASE_KEYSTORE=%s\n' "$key_path"
             printf 'PLEX_RELEASE_STORE_PASSWORD=android\n'
@@ -107,45 +121,19 @@ jobs:
             printf 'PLEX_RELEASE_KEY_PASSWORD=android\n'
           } >> "$GITHUB_ENV"
 
-      - name: Download pinned LibVLC
+      - name: Download and verify the pinned LibVLC
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_TAG: ${{ inputs.source_tag }}
         run: |
           set -euo pipefail
-          asset_dir="$RUNNER_TEMP/libvlc"
-          rm -rf "$asset_dir"
-          mkdir -p "$asset_dir" source/app/libs
-          gh release download "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" \
+          asset_dir="$(mktemp -d "$RUNNER_TEMP/libvlc.XXXXXX")"
+          mkdir -p source/app/libs
+          gh release download "$LIBVLC_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" \
             --dir "$asset_dir" --pattern "libvlc-all-3.7.5.aar"
           test -s "$asset_dir/libvlc-all-3.7.5.aar"
           test "$(sha256sum "$asset_dir/libvlc-all-3.7.5.aar" | awk '{print $1}')" = \
             "$EXPECTED_LIBVLC_SHA256"
           cp "$asset_dir/libvlc-all-3.7.5.aar" source/app/libs/
-
-      - name: Apply and verify the deterministic Universal snapshot
-        run: |
-          set -euo pipefail
-          python3 source/scripts/apply-universal-release.py source
-          python3 source/scripts/apply-universal-release.py source --check
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          build = Path("source/app/build.gradle.kts").read_text(encoding="utf-8")
-          assert re.search(r'(?m)^\s*applicationId\s*=\s*"io\.mirr\.plexplay\.universal"\s*$', build)
-          assert re.search(r'(?m)^\s*versionCode\s*=\s*17\s*$', build)
-          assert re.search(r'(?m)^\s*versionName\s*=\s*"1\.0\.16"\s*$', build)
-          for required in (
-              "source/README.md",
-              "source/USER_GUIDE.md",
-              "source/RELEASE_NOTES_v1.0.16.md",
-              "source/app/src/main/res/values/playback_update_ids.xml",
-              "source/app/src/androidTest/java/io/mirr/plexplay/ui/PlaybackSettingsPanelTest.kt",
-          ):
-              path = Path(required)
-              assert path.is_file() and path.stat().st_size > 0, required
-          PY
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -174,173 +162,169 @@ jobs:
                   totals[key] += int(suite.attrib.get(key, "0"))
           expected = int(os.environ["EXPECTED_UNIT_TESTS"])
           assert totals == {"tests": expected, "failures": 0, "errors": 0, "skipped": 0}, totals
-          print(f"Verified {expected} passing unit tests; Android UI tests compiled but not executed")
+          print(f"Verified {expected} passing unit tests; Android UI tests compiled but not executed in CI")
           PY
 
-      - name: Stage and verify the Universal APK
+      - name: Stage and verify the APK and release assets
         run: |
           set -euo pipefail
           mkdir -p dist
           cp source/app/build/outputs/apk/release/app-release.apk dist/PlexPlayUniversal.apk
+          cp source/README.md source/USER_GUIDE.md \
+            "source/BUILD_VERIFICATION_$UNIVERSAL_VERSION.md" \
+            "source/RELEASE_NOTES_$UNIVERSAL_TAG.md" dist/
           tools_dir="$ANDROID_HOME/build-tools/36.0.0"
           "$tools_dir/apksigner" verify --verbose --print-certs dist/PlexPlayUniversal.apk \
             > dist/apk-signature.txt
           grep -Fx "Signer #1 certificate SHA-256 digest: $EXPECTED_CERT_SHA256" \
             dist/apk-signature.txt
+          grep -Fx "Number of signers: 1" dist/apk-signature.txt
           "$tools_dir/zipalign" -c -P 16 -v 4 dist/PlexPlayUniversal.apk \
             > dist/apk-alignment.txt
           "$tools_dir/aapt" dump badging dist/PlexPlayUniversal.apk > dist/apk-badging.txt
           grep -F "package: name='io.mirr.plexplay.universal' versionCode='$UNIVERSAL_VERSION_CODE' versionName='$UNIVERSAL_VERSION'" \
             dist/apk-badging.txt
+          if grep -q '^application-debuggable' dist/apk-badging.txt; then
+            echo "::error::The release APK is debuggable; refusing to publish it."
+            exit 1
+          fi
           test "$(wc -c < dist/PlexPlayUniversal.apk)" -gt 20000000
           (
             cd dist
             sha256sum PlexPlayUniversal.apk > PlexPlayUniversal.apk.sha256
             sha256sum -c PlexPlayUniversal.apk.sha256
           )
+          git -C source diff --exit-code HEAD --
 
-      - name: Upload verified build records
+      - name: Upload build records
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PlexPlayUniversal-v1.0.16-verified
+          name: PlexPlayUniversal-v1.0.19-build-records
           if-no-files-found: warn
           retention-days: 30
           path: |
-            dist/PlexPlayUniversal.apk
-            dist/PlexPlayUniversal.apk.sha256
-            dist/apk-*.txt
+            dist/
             source/README.md
             source/USER_GUIDE.md
-            source/RELEASE_NOTES_v1.0.16.md
+            source/BUILD_VERIFICATION_1.0.19.md
+            source/RELEASE_NOTES_v1.0.19.md
             source/app/build/test-results/testDebugUnitTest/
             source/app/build/reports/tests/testDebugUnitTest/
 
-      - name: Commit only the verified Universal release source
-        id: release_source
-        working-directory: source
-        env:
-          BASE_COMMIT: ${{ steps.source_head.outputs.commit }}
-        run: |
-          set -euo pipefail
-          python3 scripts/apply-universal-release.py . --check
-          git fetch --no-tags origin main
-          test "$(git rev-parse origin/main)" = "$BASE_COMMIT"
-
-          python3 - <<'PY'
-          import subprocess
-
-          allowed_files = {
-              "README.md",
-              "USER_GUIDE.md",
-              "RELEASE_NOTES_v1.0.16.md",
-              "app/build.gradle.kts",
-              "app/src/main/res/values/playback_update_ids.xml",
-          }
-          allowed_prefixes = (
-              "app/src/main/java/",
-              "app/src/test/",
-              "app/src/androidTest/",
-          )
-          ignored_untracked = {"app/libs/libvlc-all-3.7.5.aar"}
-
-          def nul_paths(*command: str) -> set[str]:
-              output = subprocess.check_output(command)
-              return {item.decode("utf-8") for item in output.split(b"\0") if item}
-
-          changed = nul_paths("git", "diff", "--name-only", "-z", "HEAD")
-          untracked = nul_paths("git", "ls-files", "--others", "--exclude-standard", "-z")
-          unexpected = sorted(
-              path
-              for path in changed | (untracked - ignored_untracked)
-              if path not in allowed_files and not path.startswith(allowed_prefixes)
-          )
-          if unexpected:
-              raise SystemExit(f"Unexpected release-source changes: {unexpected}")
-          PY
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- \
-            README.md \
-            USER_GUIDE.md \
-            RELEASE_NOTES_v1.0.16.md \
-            app/build.gradle.kts \
-            app/src/main/res/values/playback_update_ids.xml \
-            app/src/main/java \
-            app/src/test \
-            app/src/androidTest
-          git diff --cached --check
-          if git diff --cached --quiet; then
-            echo "::error::The v1.0.16 snapshot produced no source changes."
-            exit 1
-          fi
-          git commit -m "Release Plex Play Universal v1.0.16"
-
-          git fetch --no-tags origin main
-          test "$(git rev-parse origin/main)" = "$BASE_COMMIT"
-          git push origin HEAD:main
-          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Publish the new verified Universal release
+      - name: Recheck main and create an absent tag and draft release
+        id: draft
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_COMMIT: ${{ steps.release_source.outputs.commit }}
+          RELEASE_COMMIT: ${{ steps.source_head.outputs.commit }}
         run: |
           set -euo pipefail
-          git -C source fetch --no-tags origin main
-          test "$(git -C source rev-parse origin/main)" = "$RELEASE_COMMIT"
-          release_response="$(mktemp "$RUNNER_TEMP/release-check.XXXXXX")"
-          if gh api --include "repos/$GITHUB_REPOSITORY/releases/tags/$UNIVERSAL_TAG" \
-            > "$release_response" 2>/dev/null; then
-            rm -f "$release_response"
-            echo "::error::Release $UNIVERSAL_TAG appeared during the build; refusing to overwrite it."
-            exit 1
-          else
-            release_status="$(awk 'NR == 1 && /^HTTP\// {print $2; exit}' "$release_response")"
-            rm -f "$release_response"
-            if [ "$release_status" != "404" ]; then
-              echo "::error::Unable to confirm that the release is absent; refusing to publish."
-              exit 1
-            fi
-          fi
-          if git -C source ls-remote --exit-code --tags origin \
-            "refs/tags/$UNIVERSAL_TAG" >/dev/null 2>&1; then
-            echo "::error::Git tag $UNIVERSAL_TAG appeared during the build; refusing to reuse it."
-            exit 1
-          else
-            tag_status=$?
-            if [ "$tag_status" -ne 2 ]; then
-              echo "::error::Unable to confirm that the Git tag is absent; refusing to publish."
-              exit 1
-            fi
-          fi
-          git -C source tag -a "$UNIVERSAL_TAG" \
-            -m "Plex Play Universal $UNIVERSAL_VERSION" "$RELEASE_COMMIT"
-          git -C source push origin "refs/tags/$UNIVERSAL_TAG"
+          test "$(git -C source rev-parse HEAD)" = "$RELEASE_COMMIT"
+          git -C source diff --exit-code HEAD --
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = \
+            "$RELEASE_COMMIT"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+            jq -s -e --arg tag "$UNIVERSAL_TAG" \
+              '[.[][] | select(.tag_name == $tag)] | length == 0'
+          # POST creates a new ref atomically and fails if one exists. Never force/update it.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$UNIVERSAL_TAG" -f "sha=$RELEASE_COMMIT" > "$RUNNER_TEMP/release-tag.json"
+          jq -e --arg commit "$RELEASE_COMMIT" \
+            '.object.type == "commit" and .object.sha == $commit' "$RUNNER_TEMP/release-tag.json"
           gh release create "$UNIVERSAL_TAG" \
             dist/PlexPlayUniversal.apk \
             dist/PlexPlayUniversal.apk.sha256 \
-            source/USER_GUIDE.md \
+            dist/README.md \
+            dist/USER_GUIDE.md \
+            "dist/BUILD_VERIFICATION_$UNIVERSAL_VERSION.md" \
+            "dist/RELEASE_NOTES_$UNIVERSAL_TAG.md" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
+            --target "$RELEASE_COMMIT" \
+            --draft \
             --title "Plex Play Universal v$UNIVERSAL_VERSION" \
-            --notes-file source/RELEASE_NOTES_v1.0.16.md \
-            --latest
+            --notes-file "source/RELEASE_NOTES_$UNIVERSAL_TAG.md"
+          release_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+            jq -s -er --arg tag "$UNIVERSAL_TAG" --arg commit "$RELEASE_COMMIT" \
+              '[.[][] | select(.tag_name == $tag)] |
+               if length == 1 and .[0].draft and .[0].target_commitish == $commit
+               then .[0].id else error("Expected one draft for the tested commit") end')"
+          printf 'id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
 
-          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" = "$UNIVERSAL_TAG"
-          test "$(gh release view "$UNIVERSAL_TAG" --repo "$GITHUB_REPOSITORY" \
-            --json assets --jq '.assets[].name' | sort)" = \
-            "$(printf '%s\n' PlexPlayUniversal.apk PlexPlayUniversal.apk.sha256 USER_GUIDE.md | sort)"
-
+      - name: Verify every uploaded draft asset before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
+          RELEASE_COMMIT: ${{ steps.source_head.outputs.commit }}
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/release-draft.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$metadata"
+          jq -e --arg tag "$UNIVERSAL_TAG" --arg commit "$RELEASE_COMMIT" \
+            '.draft == true and .prerelease == false and .tag_name == $tag and
+             .target_commitish == $commit and all(.assets[]; .state == "uploaded")' "$metadata"
+          assets=(
+            PlexPlayUniversal.apk
+            PlexPlayUniversal.apk.sha256
+            README.md
+            USER_GUIDE.md
+            "BUILD_VERIFICATION_$UNIVERSAL_VERSION.md"
+            "RELEASE_NOTES_$UNIVERSAL_TAG.md"
+          )
+          test "$(jq -r '.assets[].name' "$metadata" | sort)" = \
+            "$(printf '%s\n' "${assets[@]}" | sort)"
+          for asset in "${assets[@]}"; do
+            test "$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .size' "$metadata")" = \
+              "$(stat -c %s "dist/$asset")"
+          done
           verification_dir="$(mktemp -d "$RUNNER_TEMP/release-verify.XXXXXX")"
           gh release download "$UNIVERSAL_TAG" --repo "$GITHUB_REPOSITORY" \
-            --dir "$verification_dir" \
-            --pattern "PlexPlayUniversal.apk" \
-            --pattern "PlexPlayUniversal.apk.sha256"
+            --dir "$verification_dir" --pattern "*"
+          for asset in "${assets[@]}"; do
+            cmp --silent "dist/$asset" "$verification_dir/$asset"
+          done
           (
             cd "$verification_dir"
             sha256sum -c PlexPlayUniversal.apk.sha256
           )
-          test "$(sha256sum "$verification_dir/PlexPlayUniversal.apk" | awk '{print $1}')" = \
-            "$(sha256sum dist/PlexPlayUniversal.apk | awk '{print $1}')"
+          echo "All six draft assets match the locally verified files byte-for-byte."
+
+      - name: Publish only the verified draft for the unchanged main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
+          RELEASE_COMMIT: ${{ steps.source_head.outputs.commit }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = \
+            "$RELEASE_COMMIT"
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$UNIVERSAL_TAG" |
+            jq -e --arg commit "$RELEASE_COMMIT" \
+              '.object.type == "commit" and .object.sha == $commit'
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/release-before-publish.json"
+          jq -e --arg tag "$UNIVERSAL_TAG" --arg commit "$RELEASE_COMMIT" \
+            '.draft == true and .tag_name == $tag and .target_commitish == $commit' \
+            "$RUNNER_TEMP/release-before-publish.json"
+          # Refuse added/replaced/renamed assets since the successful download verification.
+          asset_identity='.assets | map({id, name, size, digest, updated_at, state}) | sort_by(.id)'
+          cmp --silent \
+            <(jq -S "$asset_identity" "$RUNNER_TEMP/release-draft.json") \
+            <(jq -S "$asset_identity" "$RUNNER_TEMP/release-before-publish.json")
+          gh release edit "$UNIVERSAL_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" |
+            jq -e --arg tag "$UNIVERSAL_TAG" \
+              '.draft == false and .prerelease == false and .tag_name == $tag'
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" = "$UNIVERSAL_TAG"
+          {
+            printf '## Plex Play Universal %s\n\n' "$UNIVERSAL_VERSION"
+            printf -- '- Source commit: `%s`\n' "$RELEASE_COMMIT"
+            printf -- '- JVM tests: %s passed, none failed or skipped.\n' "$EXPECTED_UNIT_TESTS"
+            printf -- '- Android UI tests compiled; CI does not claim device execution.\n'
+            printf -- '- Verified package, version, fixed signing certificate and 16 KiB ZIP alignment.\n'
+            printf -- '- All six assets were downloaded and compared before publication.\n'
+            printf -- '- APK SHA-256: `%s`\n' "$(sha256sum dist/PlexPlayUniversal.apk | awk '{print $1}')"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/plex-release.keystore"

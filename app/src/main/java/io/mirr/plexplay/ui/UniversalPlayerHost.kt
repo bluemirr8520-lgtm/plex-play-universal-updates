@@ -42,6 +42,7 @@ fun UniversalPlayerHost(
     val preferUniversalCodec = remember(context, source, playbackQuality) {
         shouldPreferUniversalCodec(
             playbackQuality = playbackQuality,
+            audioCodec = source.audioCodec,
             directPlaybackSupported = detectDevicePlaybackCompatibility(
                 context = context,
                 source = source,

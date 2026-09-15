@@ -13,6 +13,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -21,9 +22,17 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.text.CueGroup
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.MergingMediaSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.source.SilenceMediaSource
+import androidx.media3.extractor.ExtractorsFactory
+import androidx.media3.extractor.text.DefaultSubtitleParserFactory
+import androidx.media3.extractor.text.SubtitleExtractor
 import io.mirr.plexplay.BuildConfig
 import io.mirr.plexplay.data.PlaybackSource
 import io.mirr.plexplay.data.PlaybackSubtitle
@@ -78,10 +87,10 @@ internal data class UniversalSubtitleBridgeState(
 /**
  * Runs a subtitle-only Media3 player beside LibVLC.
  *
- * The companion always opens the original/direct Plex media URL, never the HLS
- * compatibility transcode that deliberately omits subtitle tracks. Audio and
- * video track types are disabled before prepare, while embedded text tracks and
- * Plex external sidecars remain available. Playback position, pause state and
+ * External sidecars are parsed without opening the original video. Only embedded
+ * tracks need the original/direct Plex media URL, never the HLS compatibility
+ * transcode that deliberately omits subtitle tracks. Audio and video track types
+ * are disabled before prepare. Playback position, pause state and
  * speed follow [vlcPlayer] without sharing its decoder or output surface.
  *
  * [selectedPlexSubtitleId] accepts [PlaybackSubtitle.stableId]. Embedded tracks
@@ -279,16 +288,8 @@ private class UniversalSubtitleBridgeController(
                 .setPreferredTextLanguages("ko", "kor")
                 .setSelectUndeterminedTextLanguage(true)
                 .build()
-            val requestedSubtitle = selectedPlexSubtitleId?.let { stableId ->
-                (source.subtitles + source.compatibilitySubtitles)
-                    .firstOrNull { it.stableId == stableId }
-            }
-            if (requestedSubtitle != null && !requestedSubtitle.isEmbedded) {
-                // Use the same MediaItem subtitle configuration path as the
-                // normal player. Direct SingleSampleMediaSource injection uses
-                // Media3's legacy subtitle decoder path and can produce no cues
-                // with the current TextRenderer. A/V renderers stay disabled, so
-                // VLC remains the only video/audio decoder.
+            val requestedSubtitle = source.requestedExternalSubtitleForBridge(selectedPlexSubtitleId)
+            if (requestedSubtitle != null) {
                 val subtitleConfiguration = MediaItem.SubtitleConfiguration.Builder(
                     Uri.parse(
                         requestedSubtitle.url.withPlexSubtitleTokenQuery(source.token),
@@ -300,11 +301,15 @@ private class UniversalSubtitleBridgeController(
                     .setLabel(requestedSubtitle.label)
                     .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
                     .build()
-                player.setMediaItem(
-                    MediaItem.Builder()
-                        .setUri(originalUrl)
-                        .setSubtitleConfigurations(listOf(subtitleConfiguration))
-                        .build(),
+                player.setMediaSource(
+                    createExternalSubtitleBridgeSource(
+                        subtitleConfiguration = subtitleConfiguration,
+                        dataSourceFactory = httpFactory,
+                        durationUs = subtitleBridgeTimelineDurationUs(
+                            source.durationMs,
+                            source.resumePositionMs,
+                        ),
+                    ),
                 )
             } else {
                 // Only embedded/native selection needs a second demux of the
@@ -586,6 +591,66 @@ private data class SubtitleTrackBinding(
     val trackIndex: Int,
 )
 
+/**
+ * Parses only the sidecar into Media3 cues. SingleSampleMediaSource uses the old
+ * decoder path, while attaching a sidecar to the original MediaItem still reads
+ * and demuxes the 4K video even when its A/V tracks are disabled.
+ *
+ * The local, disabled silence track supplies a seekable timeline covering the
+ * movie, including gaps before/after subtitles. It performs no network reads and
+ * no audio decoding. VLC remains the only video/audio player.
+ */
+@UnstableApi
+private fun createExternalSubtitleBridgeSource(
+    subtitleConfiguration: MediaItem.SubtitleConfiguration,
+    dataSourceFactory: DataSource.Factory,
+    durationUs: Long,
+): MediaSource {
+    val format = Format.Builder()
+        .setId(subtitleConfiguration.id)
+        .setSampleMimeType(subtitleConfiguration.mimeType)
+        .setLanguage(subtitleConfiguration.language)
+        .setLabel(subtitleConfiguration.label)
+        .setSelectionFlags(subtitleConfiguration.selectionFlags)
+        .setRoleFlags(subtitleConfiguration.roleFlags)
+        .build()
+    val parserFactory = DefaultSubtitleParserFactory()
+    require(parserFactory.supportsFormat(format)) { "지원하지 않는 외부 자막 형식입니다." }
+    val extractors = ExtractorsFactory {
+        // Supplying the format makes SubtitleExtractor publish MEDIA3_CUES,
+        // matching Media3 1.10's non-legacy TextRenderer.
+        arrayOf(SubtitleExtractor(parserFactory.create(format), format))
+    }
+    val subtitles = ProgressiveMediaSource.Factory(dataSourceFactory, extractors)
+        .createMediaSource(MediaItem.fromUri(subtitleConfiguration.uri))
+    val timeline = SilenceMediaSource.Factory()
+        .setDurationUs(durationUs)
+        .createMediaSource()
+    // Keep the first source's duration; do not clip to the final subtitle cue.
+    return MergingMediaSource(false, false, timeline, subtitles)
+}
+
+internal fun PlaybackSource.requestedExternalSubtitleForBridge(
+    selectedSubtitleId: String?,
+): PlaybackSubtitle? = selectedSubtitleId?.let { stableId ->
+    (subtitles + compatibilitySubtitles)
+        .firstOrNull { it.stableId == stableId }
+        ?.takeUnless { it.isEmbedded }
+}
+
+internal fun subtitleBridgeTimelineDurationUs(durationMs: Long, resumePositionMs: Long): Long {
+    // The bridge never drives movie completion. Leave room for a resume offset
+    // when metadata has an unknown or stale duration, and avoid conversion overflow.
+    val safeResumeMs = resumePositionMs.coerceAtLeast(0L)
+    val timelineDurationMs = durationMs.takeIf { it > safeResumeMs }
+        ?: (
+            safeResumeMs.coerceAtMost(Long.MAX_VALUE - SubtitleBridgeUnknownDurationMs) +
+                SubtitleBridgeUnknownDurationMs
+            )
+    return timelineDurationMs
+        .coerceAtMost(Long.MAX_VALUE / 1_000L) * 1_000L
+}
+
 internal fun PlaybackSource.originalSubtitleMediaUrlForBridge(): String {
     val candidates = (listOf(url) + fallbackUrls).distinct()
     return candidates.firstOrNull { !it.isPlexCompatibilityTranscodeUrl() }
@@ -743,3 +808,4 @@ private const val SubtitleBridgeSyncIntervalMs = 250L
 private const val SubtitleBridgePlayingDriftMs = 600L
 private const val SubtitleBridgePausedDriftMs = 150L
 private const val SubtitleBridgePrepareTimeoutMs = 15_000L
+private const val SubtitleBridgeUnknownDurationMs = 24L * 60L * 60L * 1_000L
