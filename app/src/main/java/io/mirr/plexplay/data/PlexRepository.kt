@@ -172,7 +172,33 @@ class PlexRepository(
         return true
     }
 
-    /** Only called after a real playback-end event, never by manual watched/unwatched actions. */
+    suspend fun markWatchedWithCollection(item: PlexItem): String? {
+        val connection = store.load()
+        val api = api(connection)
+        return saveWatchedWithCollection(
+            saveWatched = { api.setWatched(item.ratingKey, true) },
+            updateCollection = {
+                val resolved = api.metadata(item.ratingKey).firstOrNull { it.ratingKey == item.ratingKey }
+                    ?: throw PlexException("영상의 컬렉션 정보를 확인하지 못했습니다.")
+                val section = api.sections().firstOrNull { it.key == resolved.librarySectionId }
+                    ?: throw PlexException("영상의 라이브러리를 확인하지 못했습니다.")
+                if (!managesWatchedCollections(section.title, resolved.type)) return@saveWatchedWithCollection null
+                val tag = watchedCollectionTag(section.title, resolved.type, resolved.filePath)
+                    ?: throw PlexException("실제 파일 경로를 확인할 수 없어 컬렉션을 변경하지 않았습니다.")
+                if (store.load() != connection) throw PlexException("서버 연결이 변경되어 컬렉션 변경을 중지했습니다.")
+                api.replaceCollectionTag(
+                    sectionId = section.key,
+                    ratingKey = resolved.ratingKey,
+                    mediaType = if (resolved.type == "video" && section.type == "movie") "movie" else resolved.type,
+                    tag = tag,
+                    existingCollections = resolved.collections,
+                )
+                tag
+            },
+        )
+    }
+
+    /** Real playback completion uses the played Part; manual completion uses fresh metadata. */
     suspend fun updateCompletedPlaybackCollection(
         source: PlaybackSource,
         knownItem: PlexItem?,

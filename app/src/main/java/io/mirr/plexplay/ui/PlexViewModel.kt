@@ -461,6 +461,7 @@ class PlexViewModel(
         }
     }
 
+
     fun closePlayer() {
         clearPlaybackQueue()
         _state.update {
@@ -690,7 +691,7 @@ class PlexViewModel(
             updatedViewCount = maxOf(item.viewCount, 1),
             keepSelectedItem = true,
         ) {
-            repository.setWatched(item, watched = true)
+            repository.markWatchedWithCollection(item)
         }
     }
 
@@ -704,6 +705,7 @@ class PlexViewModel(
             keepSelectedItem = true,
         ) {
             repository.setWatched(item, watched = false)
+            null
         }
     }
 
@@ -717,6 +719,7 @@ class PlexViewModel(
             keepSelectedItem = false,
         ) {
             repository.removeFromContinueWatching(item)
+            null
         }
     }
 
@@ -727,12 +730,12 @@ class PlexViewModel(
         updatedOffset: Long?,
         updatedViewCount: Int?,
         keepSelectedItem: Boolean,
-        action: suspend () -> Unit,
+        action: suspend () -> String?,
     ) {
         viewModelScope.launch {
             _state.update { it.copy(isLoading = true, error = null) }
             try {
-                action()
+                val actionNotice = action()
                 val refreshHome = _state.value.isHome
                 fun update(candidate: PlexItem): PlexItem =
                     if (candidate.ratingKey == item.ratingKey) {
@@ -776,7 +779,7 @@ class PlexViewModel(
                         } else {
                             null
                         },
-                        notice = successMessage,
+                        notice = actionNotice ?: successMessage,
                     )
                 }
                 val currentState = _state.value
