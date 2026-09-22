@@ -543,13 +543,14 @@ private fun LibraryScreen(
                 }
             } else {
                 val selectedSection = state.selectedSection
-                val libraryContinueItems = if (
-                    !state.canNavigateBack &&
-                    state.query.isBlank() &&
-                    selectedSection != null
-                ) {
+                val showLibraryContinue = showLibraryContinueSection(
+                    hasLibrary = selectedSection != null,
+                    browsingChildren = state.canNavigateBack,
+                    query = state.query,
+                )
+                val libraryContinueItems = if (showLibraryContinue) {
                     state.libraryContinueRows
-                        .firstOrNull { it.section.key == selectedSection.key }
+                        .firstOrNull { it.section.key == selectedSection?.key }
                         ?.items
                         .orEmpty()
                 } else {
@@ -560,6 +561,7 @@ private fun LibraryScreen(
                 if (
                     libraryItems.isEmpty() &&
                     libraryContinueItems.isEmpty() &&
+                    !showLibraryContinue &&
                     !state.isLoading
                 ) {
                     EmptyLibrary(Modifier.fillMaxSize())
@@ -576,12 +578,20 @@ private fun LibraryScreen(
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalArrangement = Arrangement.spacedBy(18.dp),
                     ) {
-                        if (libraryContinueItems.isNotEmpty()) {
+                        if (showLibraryContinue) {
                             item(
                                 key = "library_continue",
                                 span = { GridItemSpan(maxLineSpan) },
                             ) {
-                                ContinueWatchingRow(
+                                if (libraryContinueItems.isEmpty()) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Text("이어보기", style = MaterialTheme.typography.titleLarge, color = Color.White)
+                                        Text(
+                                            if (state.isLoading) "이어보기 불러오는 중…" else "이 라이브러리에 이어볼 영상이 없습니다.",
+                                            color = Color.White.copy(alpha = .65f),
+                                        )
+                                    }
+                                } else ContinueWatchingRow(
                                     title = "이어보기",
                                     items = libraryContinueItems,
                                     imageUrl = imageUrl,

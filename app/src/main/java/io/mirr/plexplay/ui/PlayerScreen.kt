@@ -369,6 +369,8 @@ private enum class VideoScaleMode(
     val scaleX: Float,
     val scaleY: Float,
 ) {
+    SMALL("small", "화면 축소 · 85%", AspectRatioFrameLayout.RESIZE_MODE_FIT, .85f, .85f),
+    FILL("fill", "화면 꽉 채우기 · 가장자리 잘림", AspectRatioFrameLayout.RESIZE_MODE_ZOOM, 1f, 1f),
     FIT(
         "fit",
         "화면 맞춤 · 100%",
@@ -1892,6 +1894,7 @@ fun PlayerScreen(
                     }
                     if (pinchStarted) {
                         val zoomModes = listOf(
+                            VideoScaleMode.SMALL,
                             VideoScaleMode.FIT,
                             VideoScaleMode.ZOOM,
                             VideoScaleMode.ZOOM_LARGE,
@@ -1901,9 +1904,11 @@ fun PlayerScreen(
                             VideoScaleMode.ZOOM -> 1.15f
                             VideoScaleMode.ZOOM_LARGE -> 1.3f
                             VideoScaleMode.STRETCH -> 1f
+                            VideoScaleMode.SMALL -> .85f
+                            VideoScaleMode.FILL -> 1f
                         }
                         val targetScale =
-                            (baseScale * zoomAmount).coerceIn(1f, 1.3f)
+                            (baseScale * zoomAmount).coerceIn(.85f, 1.3f)
                         val selected = zoomModes.minBy { mode ->
                             abs(mode.scaleX - targetScale)
                         }
@@ -2246,20 +2251,25 @@ fun PlayerScreen(
             enter = fadeIn(),
             exit = fadeOut(),
         ) {
-            PlayerControlButton(
-                icon = Icons.Rounded.Settings,
-                contentDescription = "재생 설정",
-                onClick = {
-                    openPlayerSettings()
-                },
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                VideoSizeControls(videoScaleMode.storageValue) { value ->
+                    videoScaleMode = VideoScaleMode.fromStorage(value)
+                    playerPreferences.edit().putString("video_scale_mode", value).apply()
+                    playerViewHandle?.showController()
+                }
+                PlayerControlButton(
+                    icon = Icons.Rounded.Settings,
+                    contentDescription = "재생 설정",
+                    onClick = { openPlayerSettings() },
+                )
+            }
         }
         AnimatedVisibility(
             visible = controllerVisible && !playerSettingsVisible,
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(horizontal = 96.dp, vertical = 14.dp),
+                .padding(start = 72.dp, end = 232.dp, top = 14.dp, bottom = 14.dp),
             enter = fadeIn(),
             exit = fadeOut(),
         ) {

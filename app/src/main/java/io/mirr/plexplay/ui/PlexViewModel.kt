@@ -262,6 +262,13 @@ class PlexViewModel(
 
     private suspend fun loadSectionInternal(section: PlexSection) {
         val items = repository.sectionItems(section.key).sortedByKoreanTitle()
+        val continueItems = try {
+            repository.sectionOnDeck(section.key)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            null
+        }
         _state.update {
             it.copy(
                 selectedSection = section,
@@ -270,6 +277,10 @@ class PlexViewModel(
                 items = items,
                 query = "",
                 canNavigateBack = false,
+                libraryContinueRows = continueItems?.let { rows ->
+                    replaceHomeRow(it.libraryContinueRows, section, rows)
+                } ?: it.libraryContinueRows,
+                notice = if (continueItems == null) "이어보기 목록을 불러오지 못했습니다. 다시 새로고침해 주세요." else null,
             )
         }
     }
@@ -456,8 +467,25 @@ class PlexViewModel(
     }
 
     fun reportProgress(source: PlaybackSource, positionMs: Long, state: String) {
+        val section = _state.value.sections.firstOrNull { it.key == playingItem?.librarySectionId }
+            ?: _state.value.selectedSection
+        val connection = repository.connection()
         viewModelScope.launch {
-            runCatching { repository.timeline(source, state, positionMs) }
+            try {
+                repository.timeline(source, state, positionMs)
+                if (section != null && state in setOf("paused", "stopped") &&
+                    repository.connection() == connection
+                ) {
+                    val items = repository.sectionOnDeck(section.key)
+                    if (repository.connection() == connection) {
+                        _state.update { it.copy(libraryContinueRows = replaceHomeRow(it.libraryContinueRows, section, items)) }
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // Keep the last good list; entering the library retries the request.
+            }
         }
     }
 

@@ -281,6 +281,8 @@ private enum class VlcVideoScale(
     val scaleX: Float,
     val scaleY: Float,
 ) {
+    SMALL("small", "화면 축소 · 85%", .85f, .85f),
+    FILL("fill", "화면 꽉 채우기 · 가장자리 잘림", 1f, 1f),
     FIT("fit", "화면 맞춤 · 100%", 1f, 1f),
     ZOOM("zoom", "화면 확대 · 115%", 1.15f, 1.15f),
     ZOOM_LARGE("zoom_large", "화면 확대 · 130%", 1.3f, 1.3f),
@@ -1302,6 +1304,13 @@ fun VlcPlayerScreen(
         }
     }
 
+    LaunchedEffect(mediaPlayer, videoScale) {
+        mediaPlayer?.setVideoScale(
+            if (videoScale == VlcVideoScale.FILL) MediaPlayer.ScaleType.SURFACE_FIT_SCREEN
+            else MediaPlayer.ScaleType.SURFACE_BEST_FIT,
+        )
+    }
+
     LaunchedEffect(controlsVisible, settingsVisible, isPlaying, controlsInteractionRevision) {
         if (controlsVisible && !settingsVisible && isPlaying) {
             delay(7_000)
@@ -1551,11 +1560,12 @@ fun VlcPlayerScreen(
                     }
                     if (pinchStarted) {
                         val zoomModes = listOf(
+                            VlcVideoScale.SMALL,
                             VlcVideoScale.FIT,
                             VlcVideoScale.ZOOM,
                             VlcVideoScale.ZOOM_LARGE,
                         )
-                        val targetScale = (videoScale.scaleX * zoomAmount).coerceIn(1f, 1.3f)
+                        val targetScale = (videoScale.scaleX * zoomAmount).coerceIn(.85f, 1.3f)
                         val selected = zoomModes.minBy { abs(it.scaleX - targetScale) }
                         selectedVideoPreset = 0
                         videoScale = selected
@@ -1809,6 +1819,11 @@ fun VlcPlayerScreen(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                    }
+                    VideoSizeControls(videoScale.storage) { value ->
+                        videoScale = VlcVideoScale.fromStorage(value)
+                        preferences.edit().putString("video_scale_mode", value).apply()
+                        controlsInteractionRevision++
                     }
                     VlcPlayerSettingsButton(
                         onClick = {
