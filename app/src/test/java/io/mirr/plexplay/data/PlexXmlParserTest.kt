@@ -5,6 +5,18 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class PlexXmlParserTest {
+    @Test fun seriesCompletionSurvivesFreshMetadataWithoutViewCount() {
+        val xml = """<MediaContainer librarySectionID="7">
+            <Directory ratingKey="10" key="/library/metadata/10" type="show" leafCount="12" viewedLeafCount="12"/>
+            <Directory ratingKey="11" key="/library/metadata/11" type="season" leafCount="6" viewedLeafCount="6"/>
+            <Directory ratingKey="12" key="/library/metadata/12" type="show" leafCount="12" viewedLeafCount="11"/>
+            </MediaContainer>"""
+        val items = PlexXmlParser.items(ByteArrayInputStream(xml.toByteArray()))
+        assertEquals(listOf(true, true, false), items.map { it.isWatched })
+        assertEquals(listOf(0, 0, 1), items.map { it.unwatchedEpisodeCount })
+        assertEquals(listOf(0, 0, 0), items.map { it.viewCount })
+    }
+
     @Test fun allPartPathsAreRetainedWithoutChangingSelectedPlaybackPart() {
         val xml = """
             <MediaContainer librarySectionID="7">

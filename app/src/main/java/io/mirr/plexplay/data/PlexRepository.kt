@@ -161,7 +161,7 @@ class PlexRepository(
         api().watched(section.key, section.type)
 
     suspend fun setWatched(item: PlexItem, watched: Boolean) =
-        setWatched(item.ratingKey, watched)
+        api().setWatchedAndVerify(item, watched)
 
     suspend fun setWatched(ratingKey: String, watched: Boolean) =
         api().setWatched(ratingKey, watched)
@@ -172,18 +172,24 @@ class PlexRepository(
         return true
     }
 
-    suspend fun markWatchedWithCollection(item: PlexItem): String? {
+    suspend fun markWatchedWithCollection(item: PlexItem): WatchedActionResult {
         val connection = store.load()
         val api = api(connection)
-        return saveWatchedWithCollection(
-            saveWatched = { api.setWatched(item.ratingKey, true) },
+        var saved: PlexItem? = null
+        val notice = saveWatchedWithCollection(
+            saveWatched = { saved = api.setWatchedAndVerify(item, true) },
             updateCollection = {
-                val resolved = api.metadata(item.ratingKey).firstOrNull { it.ratingKey == item.ratingKey }
-                    ?: throw PlexException("영상의 컬렉션 정보를 확인하지 못했습니다.")
+                val resolved = checkNotNull(saved)
                 val section = api.sections().firstOrNull { it.key == resolved.librarySectionId }
                     ?: throw PlexException("영상의 라이브러리를 확인하지 못했습니다.")
-                if (!managesWatchedCollections(section.title, resolved.type)) return@saveWatchedWithCollection null
-                val tag = manualWatchedCollectionTag(section.title, resolved.type, resolved.mediaFilePaths)
+                if (resolved.type != "show" && !managesWatchedCollections(section.title, resolved.type)) {
+                    return@saveWatchedWithCollection null
+                }
+                val tag = if (resolved.type == "show") {
+                    seriesWatchedCollectionTag(section.title, resolved, api.seriesEpisodes(resolved.ratingKey))
+                } else {
+                    manualWatchedCollectionTag(section.title, resolved.type, resolved.mediaFilePaths)
+                }
                     ?: throw PlexException("파일 경로가 불명확하거나 여러 파일 버전의 규칙이 달라 컬렉션을 변경하지 않았습니다.")
                 if (store.load() != connection) throw PlexException("서버 연결이 변경되어 컬렉션 변경을 중지했습니다.")
                 api.replaceCollectionTag(
@@ -193,9 +199,11 @@ class PlexRepository(
                     tag = tag,
                     existingCollections = resolved.collections,
                 )
+                saved = resolved.copy(collections = listOf(tag))
                 tag
             },
         )
+        return WatchedActionResult(checkNotNull(saved), notice)
     }
 
     /** Real playback completion uses the played Part; manual completion uses fresh metadata. */

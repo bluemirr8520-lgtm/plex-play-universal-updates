@@ -16,6 +16,59 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 class PlexApiCollectionTest {
+    private fun seriesItem() = PlexItem("42", "/library/metadata/42", "show", "Series", librarySectionId = "7")
+
+    private fun seriesMetadata(viewed: Int, sectionId: String = "7") =
+        """<MediaContainer librarySectionID="$sectionId"><Directory ratingKey="42" key="/library/metadata/42" type="show" leafCount="2" viewedLeafCount="$viewed"/></MediaContainer>"""
+
+    @Test fun seriesWatchedReadsBackEpisodeCountersRatherThanInventingViewCount() = runBlocking {
+        TestServer(script = listOf(200 to "", 200 to seriesMetadata(2))).use { server ->
+            val saved = server.api.setWatchedAndVerify(seriesItem(), true)
+            assertTrue(saved.isWatched)
+            assertEquals(0, saved.viewCount)
+            assertEquals(2, saved.viewedLeafCount)
+            assertEquals(listOf("/:/scrobble", "/library/metadata/42"), server.requests.map { it.path })
+            assertEquals("42", server.requests.first().query["key"])
+        }
+    }
+
+    @Test fun delayedCountersRetryOnlyReadbackNeverTheSeriesWrite() = runBlocking {
+        TestServer(script = listOf(200 to "", 200 to seriesMetadata(0), 200 to seriesMetadata(2))).use { server ->
+            assertTrue(server.api.setWatchedAndVerify(seriesItem(), true).isWatched)
+            assertEquals(listOf("/:/scrobble", "/library/metadata/42", "/library/metadata/42"), server.requests.map { it.path })
+        }
+    }
+
+    @Test fun unpersistedOrWrongLibraryCountersDoNotClaimWatchedSuccess() = runBlocking {
+        for (metadata in listOf(seriesMetadata(1), seriesMetadata(2, "8"))) {
+            TestServer(script = listOf(200 to "") + List(3) { 200 to metadata }).use { server ->
+                expectPlexFailure { server.api.setWatchedAndVerify(seriesItem(), true) }
+                assertEquals(1, server.requests.count { it.path == "/:/scrobble" })
+                assertEquals(3, server.requests.count { it.path == "/library/metadata/42" })
+            }
+        }
+    }
+
+    @Test fun seriesUnwatchedAlsoUsesVerifiedServerCounters() = runBlocking {
+        TestServer(script = listOf(200 to "", 200 to seriesMetadata(0))).use { server ->
+            val saved = server.api.setWatchedAndVerify(seriesItem(), false)
+            assertFalse(saved.isWatched)
+            assertEquals(0, saved.viewedLeafCount)
+            assertEquals("/:/unscrobble", server.requests.first().path)
+        }
+    }
+
+    @Test fun seriesEpisodeApiFetchesEveryPageIncludingShortServerPages() = runBlocking {
+        fun page(id: String) = """<MediaContainer librarySectionID="7"><Video ratingKey="$id" key="/library/metadata/$id" type="episode" grandparentRatingKey="42" viewCount="1"><Media><Part file="/TV/$id.mkv" key="/part/$id"/></Media></Video></MediaContainer>"""
+        TestServer(script = listOf(200 to page("50"), 200 to page("51"), 200 to "<MediaContainer/>" )).use { server ->
+            val episodes = server.api.seriesEpisodes("42")
+            assertEquals(listOf("50", "51"), episodes.map { it.ratingKey })
+            assertEquals(listOf("0", "1", "2"), server.requests.map { it.query["X-Plex-Container-Start"] })
+            assertTrue(server.requests.all { it.path == "/library/metadata/42/allLeaves" && it.query["includeMedia"] == "1" })
+            assertEquals(listOf("/TV/50.mkv"), episodes.first().mediaFilePaths)
+        }
+    }
+
     @Test
     fun replacementUsesOneDisjointPutAndVerifiesTheSameItem() = runBlocking {
         TestServer(metadata = metadata("KILL")).use { server ->
@@ -72,8 +125,8 @@ class PlexApiCollectionTest {
     }
 
     @Test
-    fun supportsOnlyDocumentedPlayableVideoTypes() = runBlocking {
-        for ((type, number) in listOf("movie" to "1", "episode" to "4", "clip" to "12")) {
+    fun supportsPlayableVideoAndSeriesTypes() = runBlocking {
+        for ((type, number) in listOf("movie" to "1", "show" to "2", "episode" to "4", "clip" to "12")) {
             TestServer(metadata = metadata("123", type = type)).use { server ->
                 server.api.replaceCollectionTag("7", "42", type, "123", emptyList())
                 assertEquals(number, server.requests.first().query["type"])
@@ -84,7 +137,7 @@ class PlexApiCollectionTest {
     @Test
     fun rejectsUnknownTypeAndUnsafeIdentifiersBeforeConnecting() = runBlocking {
         TestServer(metadata = metadata("KILL")).use { server ->
-            for (type in listOf("show", "season", "track", "video", "unknown", "")) {
+            for (type in listOf("season", "track", "video", "unknown", "")) {
                 expectPlexFailure { server.api.replaceCollectionTag("7", "42", type, "KILL", emptyList()) }
             }
             expectPlexFailure { server.api.replaceCollectionTag("7/all", "42", "movie", "KILL", emptyList()) }
@@ -170,10 +223,11 @@ class PlexApiCollectionTest {
         val token: String?,
     )
 
-    private class TestServer(metadata: String, writeStatus: Int = 200, writeExpected: Boolean = true) : AutoCloseable {
+    private class TestServer(metadata: String = "", writeStatus: Int = 200, writeExpected: Boolean = true,
+        script: List<Pair<Int, String>>? = null) : AutoCloseable {
         val requests = CopyOnWriteArrayList<CapturedRequest>()
         private val responses = ConcurrentLinkedQueue(
-            if (writeExpected) listOf(writeStatus to "", 200 to metadata) else listOf(200 to metadata),
+            script ?: if (writeExpected) listOf(writeStatus to "", 200 to metadata) else listOf(200 to metadata),
         )
         private val server = ServerSocket().apply { bind(InetSocketAddress("127.0.0.1", 0)) }
         @Volatile private var running = true

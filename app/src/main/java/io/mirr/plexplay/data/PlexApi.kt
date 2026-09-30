@@ -2,6 +2,7 @@ package io.mirr.plexplay.data
 
 import io.mirr.plexplay.BuildConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
 import java.io.InputStream
@@ -141,6 +142,34 @@ class PlexApi(
         ) { }
     }
 
+    suspend fun setWatchedAndVerify(item: PlexItem, watched: Boolean): PlexItem {
+        setWatched(item.ratingKey, watched)
+        // Retry only the readback: never repeatedly mark a whole series watched.
+        repeat(3) { attempt ->
+            if (attempt > 0) delay(150L * attempt)
+            val saved = metadata(item.ratingKey).singleOrNull { it.ratingKey == item.ratingKey }
+            if (saved != null &&
+                (item.librarySectionId == null || saved.librarySectionId == item.librarySectionId) &&
+                saved.matchesSavedWatchedState(watched)
+            ) return saved
+        }
+        throw PlexException("Plex 서버의 시청 상태 저장 결과를 확인하지 못했습니다. 새로고침 후 다시 확인해 주세요.")
+    }
+
+    suspend fun seriesEpisodes(ratingKey: String): List<PlexItem> {
+        if (!ratingKey.matches(Regex("[0-9]+"))) throw PlexException("시리즈 식별자가 올바르지 않습니다.")
+        return loadAllSeriesEpisodes { start ->
+            request(
+                path = "/library/metadata/$ratingKey/allLeaves",
+                query = mapOf(
+                    "includeMedia" to "1",
+                    "X-Plex-Container-Start" to start.toString(),
+                    "X-Plex-Container-Size" to "200",
+                ),
+            ) { PlexXmlParser.items(it) }
+        }
+    }
+
     suspend fun replaceCollectionTag(
         sectionId: String,
         ratingKey: String,
@@ -150,6 +179,7 @@ class PlexApi(
     ) {
         val plexType = when (mediaType) {
             "movie" -> "1"
+            "show" -> "2"
             "episode" -> "4"
             "clip" -> "12"
             else -> throw PlexException("이 영상 유형에는 컬렉션 태그를 적용할 수 없습니다.")

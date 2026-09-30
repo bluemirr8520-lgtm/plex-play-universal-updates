@@ -1315,7 +1315,7 @@ private fun ContinueWatchingRow(
                                     trackColor = Color.White.copy(alpha = .22f),
                                 )
                                 WatchedBadge(
-                                    watched = item.isPlayable && item.isWatched,
+                                    watched = (item.isPlayable || item.isSeriesContainer) && item.isWatched,
                                     modifier = Modifier.align(Alignment.TopStart),
                                 )
                             }
@@ -1614,7 +1614,7 @@ private fun MediaCard(
                     )
                 }
                 WatchedBadge(
-                    watched = item.isPlayable && item.isWatched,
+                    watched = (item.isPlayable || item.isSeriesContainer) && item.isWatched,
                     modifier = Modifier.align(Alignment.TopStart),
                 )
                 MediaFeatureBadges(
@@ -2044,7 +2044,7 @@ private fun ItemSheet(
                                 verticalArrangement = Arrangement.spacedBy(12.dp),
                             ) {
                                 WatchedBadge(
-                                    watched = item.isPlayable && item.isWatched,
+                                    watched = (item.isPlayable || item.isSeriesContainer) && item.isWatched,
                                     modifier = Modifier,
                                 )
                                 Text(
@@ -2298,7 +2298,7 @@ private fun LegacyItemSheet(
                         ),
                 )
                 WatchedBadge(
-                    watched = item.isPlayable && item.isWatched,
+                    watched = (item.isPlayable || item.isSeriesContainer) && item.isWatched,
                     modifier = Modifier.align(Alignment.TopStart),
                 )
                 MediaFeatureBadges(

@@ -77,7 +77,13 @@ data class PlexItem(
         get() = if (durationMs > 0) (viewOffsetMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
 
     val isWatched: Boolean
-        get() = viewCount > 0 || progress >= .95f
+        get() = if (isSeriesContainer) {
+            leafCount > 0 && viewedLeafCount >= leafCount
+        } else {
+            viewCount > 0 || progress >= .95f
+        }
+
+    val isSeriesContainer: Boolean get() = type == "show" || type == "season"
 
     val unwatchedEpisodeCount: Int
         get() = if (type == "show" || type == "season") {

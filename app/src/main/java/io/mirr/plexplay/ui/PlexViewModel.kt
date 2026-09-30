@@ -10,6 +10,7 @@ import io.mirr.plexplay.data.PlexException
 import io.mirr.plexplay.data.PlexItem
 import io.mirr.plexplay.data.PlexRepository
 import io.mirr.plexplay.data.PlexSection
+import io.mirr.plexplay.data.WatchedActionResult
 import io.mirr.plexplay.data.matchesPlaybackCompletion
 import io.mirr.plexplay.data.playbackFolderKey
 import io.mirr.plexplay.data.sameFolderPlaybackQueue
@@ -715,8 +716,6 @@ class PlexViewModel(
             item = item,
             successMessage = "시청한 콘텐츠로 표시했습니다.",
             removeFromContinue = true,
-            updatedOffset = item.durationMs,
-            updatedViewCount = maxOf(item.viewCount, 1),
             keepSelectedItem = true,
         ) {
             repository.markWatchedWithCollection(item)
@@ -728,12 +727,9 @@ class PlexViewModel(
             item = item,
             successMessage = "시청하지 않은 콘텐츠로 표시했습니다.",
             removeFromContinue = true,
-            updatedOffset = 0,
-            updatedViewCount = 0,
             keepSelectedItem = true,
         ) {
-            repository.setWatched(item, watched = false)
-            null
+            WatchedActionResult(repository.setWatched(item, watched = false))
         }
     }
 
@@ -742,12 +738,10 @@ class PlexViewModel(
             item = item,
             successMessage = "이어보기에서 제거했습니다.",
             removeFromContinue = true,
-            updatedOffset = null,
-            updatedViewCount = null,
             keepSelectedItem = false,
         ) {
             repository.removeFromContinueWatching(item)
-            null
+            WatchedActionResult(null)
         }
     }
 
@@ -755,22 +749,19 @@ class PlexViewModel(
         item: PlexItem,
         successMessage: String,
         removeFromContinue: Boolean,
-        updatedOffset: Long?,
-        updatedViewCount: Int?,
         keepSelectedItem: Boolean,
-        action: suspend () -> String?,
+        action: suspend () -> WatchedActionResult,
     ) {
+        if (_state.value.isLoading) return
+        relatedJob?.cancel()
         viewModelScope.launch {
-            _state.update { it.copy(isLoading = true, error = null) }
+            _state.update { it.copy(isLoading = true, isRelatedLoading = false, error = null) }
             try {
-                val actionNotice = action()
+                val result = action()
                 val refreshHome = _state.value.isHome
                 fun update(candidate: PlexItem): PlexItem =
                     if (candidate.ratingKey == item.ratingKey) {
-                        candidate.copy(
-                            viewOffsetMs = updatedOffset ?: candidate.viewOffsetMs,
-                            viewCount = updatedViewCount ?: candidate.viewCount,
-                        )
+                        result.item ?: candidate
                     } else {
                         candidate
                     }
@@ -807,7 +798,7 @@ class PlexViewModel(
                         } else {
                             null
                         },
-                        notice = actionNotice ?: successMessage,
+                        notice = result.notice ?: successMessage,
                     )
                 }
                 val currentState = _state.value
