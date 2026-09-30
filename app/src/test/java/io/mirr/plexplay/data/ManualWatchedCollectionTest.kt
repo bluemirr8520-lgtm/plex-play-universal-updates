@@ -6,6 +6,57 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ManualWatchedCollectionTest {
+    @Test fun sharedServerSavesWatchedWithoutReadingPathsOrEditingCollection() = runBlocking {
+        val connection = PlexConnection("http://fixture", "fixture", isServerOwner = false)
+        var saved = false
+        var attempted = false
+        val result = saveWatchedWithCollection(
+            saveWatched = { saved = true },
+            updateCollection = { attempted = true; error("Shared metadata may omit paths") },
+            collectionUpdatesAllowed = connection.mayUpdateCollections,
+        )
+        assertTrue(saved)
+        assertFalse(attempted)
+        assertNull(result)
+    }
+    @Test fun sharedWatchedFailureStillPropagates() = runBlocking {
+        val expected = PlexException("Watched permission denied")
+        try {
+            saveWatchedWithCollection({ throw expected }, { error("Must not edit") }, false)
+            fail("Expected watched error")
+        } catch (actual: PlexException) {
+            assertSame(expected, actual)
+        }
+    }
+    @Test fun legacyAndOwnerConnectionsKeepCollectionSupport() {
+        assertTrue(PlexConnection().mayUpdateCollections)
+        assertTrue(PlexConnection(isServerOwner = true).mayUpdateCollections)
+        assertFalse(PlexConnection(isServerOwner = false).mayUpdateCollections)
+    }
+    @Test fun optionalPermissionDenialKeepsWatchedWithoutFailureOrFalseCollectionSuccess() = runBlocking {
+        var saved = false
+        val denied = PlexException("denied", collectionPermissionDenied = true)
+        assertNull(saveWatchedWithCollection({ saved = true }, { throw denied }))
+        assertTrue(saved)
+        // The automatic-completion UI uses this same notice policy.
+        assertNull(watchedCollectionFailureNotice(denied))
+    }
+    @Test fun unrelatedFailuresAreNotSilencedByTheirMessageText() {
+        for (error in listOf(PlexException("Plex 계정 인증에 실패했습니다."),
+            PlexException("컬렉션 변경에는 Plex 메타데이터 편집 권한이 필요합니다."),
+            PlexException("Plex 서버 응답 오류 (500)"), IllegalStateException("network"))) {
+            assertTrue(watchedCollectionFailureNotice(error)!!.contains(error.message!!))
+        }
+    }
+    @Test fun automaticNoticePolicyPreservesCancellation() {
+        val expected = CancellationException("cancel")
+        try {
+            watchedCollectionFailureNotice(expected)
+            fail("Expected cancellation")
+        } catch (actual: CancellationException) {
+            assertSame(expected, actual)
+        }
+    }
     @Test fun savesWatchedBeforeReplacingCollection() = runBlocking {
         for (tag in listOf("KILL", "123")) {
             val events = mutableListOf<String>()

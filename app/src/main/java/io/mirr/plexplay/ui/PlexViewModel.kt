@@ -12,6 +12,7 @@ import io.mirr.plexplay.data.PlexRepository
 import io.mirr.plexplay.data.PlexSection
 import io.mirr.plexplay.data.WatchedActionResult
 import io.mirr.plexplay.data.WatchedCollectionSettings
+import io.mirr.plexplay.data.watchedCollectionFailureNotice
 import io.mirr.plexplay.data.matchesPlaybackCompletion
 import io.mirr.plexplay.data.playbackFolderKey
 import io.mirr.plexplay.data.sameFolderPlaybackQueue
@@ -624,8 +625,8 @@ class PlexViewModel(
                 throw error
             } catch (error: Exception) {
                 // Do not stop next playback or roll back the successful watched-state update.
-                _state.update {
-                    it.copy(notice = "시청 완료는 저장됐지만 컬렉션 변경에 실패했습니다. ${error.message.orEmpty()}")
+                watchedCollectionFailureNotice(error)?.let { notice ->
+                    _state.update { it.copy(notice = notice) }
                 }
             } finally {
                 pendingCollectionUpdates.remove(source.playbackId)

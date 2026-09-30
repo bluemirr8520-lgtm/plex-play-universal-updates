@@ -59,6 +59,7 @@ class PlexRepository(
             val connection = PlexConnection(
                 baseUrl = endpoint.uri,
                 token = endpoint.token,
+                isServerOwner = endpoint.isOwned,
             )
             try {
                 return connection to connect(connection)
@@ -186,6 +187,7 @@ class PlexRepository(
         val api = api(connection)
         var saved: PlexItem? = null
         val notice = saveWatchedWithCollection(
+            collectionUpdatesAllowed = connection.mayUpdateCollections,
             saveWatched = { saved = api.setWatchedAndVerify(item, true) },
             updateCollection = {
                 val resolved = checkNotNull(saved)
@@ -222,6 +224,7 @@ class PlexRepository(
         knownSections: List<PlexSection>,
     ): String? {
         val connection = validatedPlaybackConnection(source, store.load()) ?: return null
+        if (!connection.mayUpdateCollections) return null
         val collectionSettings = store.watchedCollectionSettings()
         val knownSection = knownSections.firstOrNull { it.key == knownItem?.librarySectionId }
         if (knownItem != null && knownSection != null &&

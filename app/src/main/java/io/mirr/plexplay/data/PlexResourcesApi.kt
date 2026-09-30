@@ -1,10 +1,10 @@
 package io.mirr.plexplay.data
 
-import android.util.Xml
 import io.mirr.plexplay.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.xmlpull.v1.XmlPullParser
+import org.xmlpull.v1.XmlPullParserFactory
 import java.net.HttpURLConnection
 import java.net.URI
 
@@ -14,6 +14,7 @@ data class PlexServerConnection(
     val token: String,
     val isLocal: Boolean,
     val isRelay: Boolean,
+    val isOwned: Boolean? = null,
 )
 
 class PlexResourcesApi(
@@ -42,54 +43,67 @@ class PlexResourcesApi(
                 if (http.responseCode !in 200..299) {
                     throw PlexException("Plex 서버 주소를 계정에서 조회하지 못했습니다.")
                 }
-                parse(http.inputStream)
+                http.inputStream.use { parsePlexServerConnections(it, accountToken) }
             } finally {
                 http.disconnect()
             }
         }
+}
 
-    private fun parse(input: java.io.InputStream): List<PlexServerConnection> {
-        val parser = Xml.newPullParser().apply {
-            setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
-            setInput(input, null)
+internal fun parsePlexServerConnections(
+    input: java.io.InputStream,
+    accountToken: String,
+): List<PlexServerConnection> {
+    val parser = XmlPullParserFactory.newInstance().newPullParser().apply {
+        setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
+        setInput(input, null)
+    }
+    val result = mutableListOf<PlexServerConnection>()
+    var serverName = ""
+    var serverToken = ""
+    var isServer = false
+    var isOwned: Boolean? = null
+
+    while (parser.next() != XmlPullParser.END_DOCUMENT) {
+        if (parser.eventType == XmlPullParser.END_TAG && parser.name == "Device") {
+            isServer = false
         }
-        val result = mutableListOf<PlexServerConnection>()
-        var serverName = ""
-        var serverToken = ""
-        var isServer = false
-
-        while (parser.next() != XmlPullParser.END_DOCUMENT) {
-            if (parser.eventType != XmlPullParser.START_TAG) continue
-            when (parser.name) {
-                "Device" -> {
-                    isServer = parser.attribute("provides")
-                        .orEmpty()
-                        .split(',')
-                        .any { it.trim() == "server" }
-                    serverName = parser.attribute("name").orEmpty()
-                    serverToken = parser.attribute("accessToken") ?: accountToken
+        if (parser.eventType != XmlPullParser.START_TAG) continue
+        when (parser.name) {
+            "Device" -> {
+                isServer = parser.attribute("provides")
+                    .orEmpty()
+                    .split(',')
+                    .any { it.trim() == "server" }
+                serverName = parser.attribute("name").orEmpty()
+                serverToken = parser.attribute("accessToken") ?: accountToken
+                isOwned = when (parser.attribute("owned")) {
+                    "1" -> true
+                    "0" -> false
+                    else -> null
                 }
-                "Connection" -> if (isServer) {
-                    val uri = parser.attribute("uri").orEmpty()
-                    if (uri.isNotBlank()) {
-                        result += PlexServerConnection(
-                            serverName = serverName,
-                            uri = uri.trimEnd('/'),
-                            token = serverToken,
-                            isLocal = parser.attribute("local") == "1",
-                            isRelay = parser.attribute("relay") == "1",
-                        )
-                    }
+            }
+            "Connection" -> if (isServer) {
+                val uri = parser.attribute("uri").orEmpty()
+                if (uri.isNotBlank()) {
+                    result += PlexServerConnection(
+                        serverName = serverName,
+                        uri = uri.trimEnd('/'),
+                        token = serverToken,
+                        isLocal = parser.attribute("local") == "1",
+                        isRelay = parser.attribute("relay") == "1",
+                        isOwned = isOwned,
+                    )
                 }
             }
         }
-        return result.sortedWith(
-            compareBy<PlexServerConnection> { it.isRelay }
-                .thenBy { !it.uri.startsWith("https://") }
-                .thenBy { it.isLocal },
-        )
     }
-
-    private fun XmlPullParser.attribute(name: String): String? =
-        getAttributeValue(null, name)
+    return result.sortedWith(
+        compareBy<PlexServerConnection> { it.isRelay }
+            .thenBy { !it.uri.startsWith("https://") }
+            .thenBy { it.isLocal },
+    )
 }
+
+private fun XmlPullParser.attribute(name: String): String? =
+    getAttributeValue(null, name)

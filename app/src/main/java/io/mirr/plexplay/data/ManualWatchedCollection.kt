@@ -6,13 +6,22 @@ import kotlinx.coroutines.CancellationException
 internal suspend fun saveWatchedWithCollection(
     saveWatched: suspend () -> Unit,
     updateCollection: suspend () -> String?,
+    collectionUpdatesAllowed: Boolean = true,
 ): String? {
     saveWatched()
+    if (!collectionUpdatesAllowed) return null
     return try {
         updateCollection()?.let { "시청 완료로 표시하고 컬렉션을 $it 하나로 변경했습니다." }
     } catch (error: CancellationException) {
         throw error
     } catch (error: Exception) {
-        "시청 완료는 저장됐지만 컬렉션 변경에 실패했습니다. ${error.message.orEmpty()}"
+        watchedCollectionFailureNotice(error)
     }
+}
+
+/** Shared policy for manual completion and end-of-playback completion. */
+internal fun watchedCollectionFailureNotice(error: Exception): String? {
+    if (error is CancellationException) throw error
+    if (error is PlexException && error.collectionPermissionDenied) return null
+    return "시청 완료는 저장됐지만 컬렉션 변경에 실패했습니다. ${error.message.orEmpty()}"
 }

@@ -207,6 +207,7 @@ class PlexApi(
             },
             method = "PUT",
             forbiddenMessage = "컬렉션 변경에는 Plex 메타데이터 편집 권한이 필요합니다. 서버 소유자 계정을 확인해 주세요.",
+            collectionEdit = true,
         ) { }
 
         val updated = metadata(ratingKey).singleOrNull { it.ratingKey == ratingKey }
@@ -283,6 +284,7 @@ class PlexApi(
         query: Map<String, String> = emptyMap(),
         method: String = "GET",
         forbiddenMessage: String? = null,
+        collectionEdit: Boolean = false,
         parse: (InputStream) -> T,
     ): T = withContext(Dispatchers.IO) {
         val queryString = query.entries.joinToString("&") {
@@ -320,7 +322,11 @@ class PlexApi(
                         404 -> "요청한 Plex 콘텐츠를 찾지 못했습니다."
                         else -> "Plex 서버 응답 오류 ($status)"
                     }
-                    throw PlexException(message)
+                    throw PlexException(
+                        message,
+                        collectionPermissionDenied = collectionEdit &&
+                            connection.isServerOwner != true && status in setOf(401, 403),
+                    )
                 }
                 return@withContext BufferedInputStream(http.inputStream).use(parse)
             } catch (error: PlexException) {

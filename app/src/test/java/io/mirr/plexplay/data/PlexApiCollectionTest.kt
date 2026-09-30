@@ -14,6 +14,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
 
 class PlexApiCollectionTest {
     @Test fun userDefinedCollectionNameIsEncodedAndVerifiedWithoutHardcodedTags() = runBlocking {
@@ -177,6 +179,8 @@ class PlexApiCollectionTest {
                     server.api.replaceCollectionTag("7", "42", "movie", "KILL", listOf("Old"))
                 }
                 assertTrue(error.message.orEmpty().contains(expectedMessage))
+                assertTrue(error.collectionPermissionDenied)
+                assertNull(watchedCollectionFailureNotice(error))
                 assertEquals(1, server.requests.size)
             }
         }
@@ -208,8 +212,37 @@ class PlexApiCollectionTest {
     @Test fun serverFailureDoesNotRepeatCollectionWrites() = runBlocking {
         for (status in listOf(500, 503)) {
             TestServer(metadata = metadata("KILL"), writeStatus = status).use { server ->
-                expectPlexFailure { server.api.replaceCollectionTag("7", "42", "movie", "KILL", listOf("Old")) }
+                val error = expectPlexFailure { server.api.replaceCollectionTag("7", "42", "movie", "KILL", listOf("Old")) }
+                assertFalse(error.collectionPermissionDenied)
+                assertNotNull(watchedCollectionFailureNotice(error))
                 assertEquals(listOf("PUT"), server.requests.map { it.method })
+            }
+        }
+    }
+
+    @Test fun confirmedOwnerPermissionFailuresRemainVisible() = runBlocking {
+        for (status in listOf(401, 403)) {
+            TestServer(writeStatus = status, isServerOwner = true).use { server ->
+                val error = expectPlexFailure { server.api.replaceCollectionTag("7", "42", "movie", "KILL", listOf("Old")) }
+                assertFalse(error.collectionPermissionDenied)
+                assertNotNull(watchedCollectionFailureNotice(error))
+                assertEquals(listOf("PUT"), server.requests.map { it.method })
+            }
+        }
+    }
+
+    @Test fun watchedAndMetadataPermissionErrorsAreNeverOptional() = runBlocking {
+        for (status in listOf(401, 403)) {
+            TestServer(script = listOf(status to "")).use { server ->
+                val error = expectPlexFailure { server.api.setWatched("42", true) }
+                assertFalse(error.collectionPermissionDenied)
+                assertEquals("/:/scrobble", server.requests.single().path)
+            }
+            TestServer(script = listOf(200 to "", status to "")).use { server ->
+                val error = expectPlexFailure { server.api.replaceCollectionTag("7", "42", "movie", "KILL", listOf("Old")) }
+                assertFalse(error.collectionPermissionDenied)
+                assertNotNull(watchedCollectionFailureNotice(error))
+                assertEquals(listOf("PUT", "GET"), server.requests.map { it.method })
             }
         }
     }
@@ -233,7 +266,7 @@ class PlexApiCollectionTest {
     )
 
     private class TestServer(metadata: String = "", writeStatus: Int = 200, writeExpected: Boolean = true,
-        script: List<Pair<Int, String>>? = null) : AutoCloseable {
+        script: List<Pair<Int, String>>? = null, isServerOwner: Boolean? = null) : AutoCloseable {
         val requests = CopyOnWriteArrayList<CapturedRequest>()
         private val responses = ConcurrentLinkedQueue(
             script ?: if (writeExpected) listOf(writeStatus to "", 200 to metadata) else listOf(200 to metadata),
@@ -260,7 +293,7 @@ class PlexApiCollectionTest {
                 activeSocket = null
             }
         }
-        val api = PlexApi(PlexConnection("http://127.0.0.1:${server.localPort}", "test-token"), "collection-test")
+        val api = PlexApi(PlexConnection("http://127.0.0.1:${server.localPort}", "test-token", isServerOwner), "collection-test")
 
         private fun respond(socket: Socket) {
                 val reader = socket.getInputStream().bufferedReader(Charsets.UTF_8)

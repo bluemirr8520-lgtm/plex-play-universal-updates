@@ -19,6 +19,9 @@ class ConnectionStore(context: Context) {
     fun load(): PlexConnection = PlexConnection(
         baseUrl = preferences.getString("base_url", "").orEmpty(),
         token = if (preferences.getInt("auth_version", 0) >= 3) loadToken() else "",
+        isServerOwner = if (preferences.contains("server_owned")) {
+            preferences.getBoolean("server_owned", false)
+        } else null,
     )
 
     fun save(connection: PlexConnection) {
@@ -27,6 +30,11 @@ class ConnectionStore(context: Context) {
             .putString("token_encrypted", encrypt(connection.token.trim()))
             .putInt("auth_version", 3)
             .remove("token")
+            .apply {
+                // A different server/account must not inherit the previous role.
+                if (connection.isServerOwner == null) remove("server_owned")
+                else putBoolean("server_owned", connection.isServerOwner)
+            }
             .apply()
     }
 
@@ -36,6 +44,7 @@ class ConnectionStore(context: Context) {
             .remove("token_encrypted")
             .remove("token")
             .remove("auth_version")
+            .remove("server_owned")
             .apply()
     }
 

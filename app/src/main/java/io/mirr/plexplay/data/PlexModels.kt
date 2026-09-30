@@ -5,8 +5,11 @@ import java.util.UUID
 data class PlexConnection(
     val baseUrl: String = "",
     val token: String = "",
+    // Null preserves legacy logins whose resource ownership was not saved.
+    val isServerOwner: Boolean? = null,
 ) {
     val isConfigured: Boolean get() = baseUrl.isNotBlank() && token.isNotBlank()
+    val mayUpdateCollections: Boolean get() = isServerOwner != false
 }
 
 data class PlexServer(
@@ -171,4 +174,9 @@ enum class PlaybackQuality(
     SD_480("480p", "720x480", 2_000),
 }
 
-class PlexException(message: String, cause: Throwable? = null) : Exception(message, cause)
+class PlexException(
+    message: String,
+    cause: Throwable? = null,
+    // Only an optional collection PUT denied to a non-owner/unknown login.
+    val collectionPermissionDenied: Boolean = false,
+) : Exception(message, cause)
