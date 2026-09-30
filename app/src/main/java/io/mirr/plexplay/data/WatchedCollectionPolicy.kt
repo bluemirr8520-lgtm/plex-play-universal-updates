@@ -2,12 +2,28 @@ package io.mirr.plexplay.data
 
 private val WatchedCollectionVideoTypes = setOf("movie", "episode", "clip", "video")
 
-private val WatchedCollectionSpecialFolders = listOf(
-    "posix:/mnt/GDS2/GDRIVE/VIDEO/AV/자막B/NO_META",
-    "posix:/mnt/GDS2/GDRIVE/VIDEO/AV/자막B/Uncensored/NO_META",
-    "posix:/mnt/GDS2/GDRIVE/VIDEO/AV/자막B/Western/NO_META",
-    "posix:/mnt/GDS2/GDRIVE/VIDEO/AV/자막B/기타",
-)
+private val WatchedCollectionCommonBase = "GDRIVE/VIDEO/AV/자막B".split('/')
+
+/** Match complete physical directory components, never a filename or partial folder name. */
+private fun isSpecialCollectionFolder(folder: String): Boolean {
+    val ignoreCase = folder.startsWith("windows:") || folder.startsWith("unc:")
+    val components = when {
+        folder.startsWith("posix:/") -> folder.removePrefix("posix:/").split('/')
+        folder.startsWith("windows:") -> folder.removePrefix("windows:").split('/').drop(1)
+        // The UNC host and share are not physical folders within the share.
+        folder.startsWith("unc://") -> folder.removePrefix("unc://").split('/').drop(2)
+        else -> return false
+    }
+    return components.windowed(WatchedCollectionCommonBase.size).withIndex().any { (index, candidate) ->
+        val matchesBase = candidate.zip(WatchedCollectionCommonBase)
+            .all { (actual, expected) -> actual.equals(expected, ignoreCase) }
+        val belowBase = components.drop(index + WatchedCollectionCommonBase.size)
+        matchesBase && (
+            belowBase.any { it.equals("NO_META", ignoreCase) } ||
+                belowBase.firstOrNull() == "기타"
+            )
+    }
+}
 
 private val PlexApiFolders = listOf(
     "posix:/library/metadata",
@@ -25,8 +41,10 @@ internal fun watchedCollectionTag(
     libraryTitle: String?,
     mediaType: String,
     filePath: String?,
+    settings: WatchedCollectionSettings = WatchedCollectionSettings(),
 ): String? {
     if (!managesWatchedCollections(libraryTitle, mediaType)) return null
+    val names = settings.normalizedOrNull() ?: return null
     // Unusual physical paths are ambiguous for a destructive tag replacement.
     // This guard does not change playback-folder navigation's normalization.
     if (filePath == null || filePath.any { it.code < 32 } ||
@@ -34,10 +52,10 @@ internal fun watchedCollectionTag(
     ) return null
     val folder = playbackFolderKey(filePath) ?: return null
     if (PlexApiFolders.any { folder == it || folder.startsWith("$it/") }) return null
-    return if (WatchedCollectionSpecialFolders.any { folder == it || folder.startsWith("$it/") }) {
-        "123"
+    return if (isSpecialCollectionFolder(folder)) {
+        names.specialName
     } else {
-        "KILL"
+        names.defaultName
     }
 }
 
@@ -46,9 +64,10 @@ internal fun manualWatchedCollectionTag(
     libraryTitle: String?,
     mediaType: String,
     filePaths: List<String>,
+    settings: WatchedCollectionSettings = WatchedCollectionSettings(),
 ): String? {
     if (filePaths.isEmpty()) return null
-    val tags = filePaths.map { watchedCollectionTag(libraryTitle, mediaType, it) }
+    val tags = filePaths.map { watchedCollectionTag(libraryTitle, mediaType, it, settings) }
     if (tags.any { it == null }) return null
     return tags.distinct().singleOrNull()
 }

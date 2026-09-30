@@ -80,6 +80,14 @@ class SeriesWatchedPolicyTest {
             mediaFilePaths = versions.mediaFilePaths + ""), episode("21"))))
     }
 
+    @Test fun seriesCompletionUsesSavedNamesAndDifferentMountPrefixes() {
+        val settings = WatchedCollectionSettings("본 시리즈", "예외 보관")
+        assertEquals("본 시리즈", seriesWatchedCollectionTag("TV", series(), listOf(episode("20"), episode("21")), settings))
+        val episodes = listOf(episode("20", "/data/GDRIVE/VIDEO/AV/자막B/New/Group/NO_META/20.mkv"),
+            episode("21", "/mnt/GDS9/GDRIVE/VIDEO/AV/자막B/Another/NO_META/Season/21.mkv"))
+        assertEquals("예외 보관", seriesWatchedCollectionTag("TV", series(), episodes, settings))
+    }
+
     @Test fun paginationReadsBeyondShortPagesUntilAnEmptyPage() = runBlocking {
         val starts = mutableListOf<Int>()
         val result = loadAllSeriesEpisodes { start ->

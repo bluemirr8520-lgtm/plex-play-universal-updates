@@ -11,6 +11,7 @@ import io.mirr.plexplay.data.PlexItem
 import io.mirr.plexplay.data.PlexRepository
 import io.mirr.plexplay.data.PlexSection
 import io.mirr.plexplay.data.WatchedActionResult
+import io.mirr.plexplay.data.WatchedCollectionSettings
 import io.mirr.plexplay.data.matchesPlaybackCompletion
 import io.mirr.plexplay.data.playbackFolderKey
 import io.mirr.plexplay.data.sameFolderPlaybackQueue
@@ -65,6 +66,8 @@ data class PlexUiState(
     val isSettingsVisible: Boolean = false,
     val isLibraryOrderVisible: Boolean = false,
     val isAccountVisible: Boolean = false,
+    val isCollectionSettingsVisible: Boolean = false,
+    val watchedCollectionSettings: WatchedCollectionSettings = WatchedCollectionSettings(),
     val canNavigateBack: Boolean = false,
     val error: String? = null,
     val notice: String? = null,
@@ -88,6 +91,7 @@ class PlexViewModel(
             connection = repository.connection(),
             playbackQuality = repository.playbackQuality(),
             autoPlayNext = repository.autoPlayNext(),
+            watchedCollectionSettings = repository.watchedCollectionSettings(),
         ),
     )
     val state: StateFlow<PlexUiState> = _state.asStateFlow()
@@ -398,6 +402,10 @@ class PlexViewModel(
     }
 
     fun navigateBack(): Boolean {
+        if (_state.value.isCollectionSettingsVisible) {
+            if (!_state.value.isLoading) showCollectionSettings(false)
+            return true
+        }
         if (_state.value.isAccountVisible) {
             showAccount(false)
             return true
@@ -900,6 +908,36 @@ class PlexViewModel(
     fun showSettings(show: Boolean) = _state.update { it.copy(isSettingsVisible = show) }
     fun showAccount(show: Boolean) = _state.update { it.copy(isAccountVisible = show) }
 
+    fun showCollectionSettings(show: Boolean) = _state.update {
+        it.copy(isCollectionSettingsVisible = show, isAccountVisible = !show)
+    }
+
+    fun saveCollectionSettings(settings: WatchedCollectionSettings) {
+        if (_state.value.isLoading) return
+        val normalized = settings.normalizedOrNull()
+        if (normalized == null) {
+            _state.update { it.copy(error = "컬렉션명은 줄바꿈 없이 1~100자로 입력해 주세요.") }
+            return
+        }
+        viewModelScope.launch {
+            _state.update { it.copy(isLoading = true, error = null) }
+            try {
+                repository.saveWatchedCollectionSettings(normalized)
+                _state.update {
+                    it.copy(watchedCollectionSettings = normalized,
+                        isCollectionSettingsVisible = false, isAccountVisible = true,
+                        notice = "컬렉션명을 저장했습니다. 다음 시청 완료부터 적용합니다.")
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                showError(error)
+            } finally {
+                _state.update { it.copy(isLoading = false) }
+            }
+        }
+    }
+
     fun logout() {
         playingItem = null
         repository.logout()
@@ -908,6 +946,7 @@ class PlexViewModel(
             connection = repository.connection(),
             playbackQuality = repository.playbackQuality(),
             autoPlayNext = repository.autoPlayNext(),
+            watchedCollectionSettings = repository.watchedCollectionSettings(),
         )
     }
 

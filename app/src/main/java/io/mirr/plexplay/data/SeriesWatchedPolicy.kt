@@ -17,6 +17,7 @@ internal fun seriesWatchedCollectionTag(
     libraryTitle: String,
     series: PlexItem,
     episodes: List<PlexItem>,
+    settings: WatchedCollectionSettings = WatchedCollectionSettings(),
 ): String? {
     if (series.type != "show" || !series.isWatched || series.librarySectionId.isNullOrBlank() ||
         episodes.isEmpty() || episodes.size != series.leafCount ||
@@ -27,7 +28,7 @@ internal fun seriesWatchedCollectionTag(
                 it.librarySectionId != series.librarySectionId || it.viewCount <= 0 || it.mediaFilePaths.isEmpty()
         }
     ) return null
-    return manualWatchedCollectionTag(libraryTitle, "episode", episodes.flatMap { it.mediaFilePaths })
+    return manualWatchedCollectionTag(libraryTitle, "episode", episodes.flatMap { it.mediaFilePaths }, settings)
 }
 
 /** Do not accept a truncated first page, including servers with a smaller page cap. */

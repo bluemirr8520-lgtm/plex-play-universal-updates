@@ -87,6 +87,19 @@ class ConnectionStore(context: Context) {
     fun autoPlayNext(): Boolean =
         preferences.getBoolean("auto_play_next", false)
 
+    fun watchedCollectionSettings(): WatchedCollectionSettings =
+        readWatchedCollectionSettings { preferences.getString(it, null) }
+
+    fun saveWatchedCollectionSettings(settings: WatchedCollectionSettings) {
+        val normalized = settings.normalizedOrNull()
+            ?: throw PlexException("컬렉션명은 줄바꿈 없이 1~100자로 입력해 주세요.")
+        if (!preferences.edit()
+                .putString(DefaultCollectionNameKey, normalized.defaultName)
+                .putString(SpecialCollectionNameKey, normalized.specialName)
+                .commit()
+        ) throw PlexException("컬렉션 설정을 저장하지 못했습니다. 다시 시도해 주세요.")
+    }
+
     fun saveAutoPlayNext(enabled: Boolean) {
         preferences.edit()
             .putBoolean("auto_play_next", enabled)

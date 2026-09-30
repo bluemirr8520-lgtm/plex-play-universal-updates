@@ -150,6 +150,7 @@ fun PlexPlayApp(viewModel: PlexViewModel) {
             state.isSettingsVisible
             || state.isLibraryOrderVisible
             || state.isAccountVisible
+            || state.isCollectionSettingsVisible
     BackHandler(
         enabled = state.connection.isConfigured &&
             state.playback == null &&
@@ -289,8 +290,17 @@ fun PlexPlayApp(viewModel: PlexViewModel) {
                 serverName = state.serverName,
                 serverVersion = state.serverVersion,
                 serverUrl = state.connection.baseUrl,
+                onCollectionSettings = { viewModel.showCollectionSettings(true) },
                 onLogout = viewModel::logout,
                 onDismiss = { viewModel.showAccount(false) },
+            )
+        }
+        if (state.isCollectionSettingsVisible) {
+            CollectionSettingsDialog(
+                settings = state.watchedCollectionSettings,
+                isSaving = state.isLoading,
+                onSave = viewModel::saveCollectionSettings,
+                onDismiss = { viewModel.showCollectionSettings(false) },
             )
         }
     }
@@ -1037,14 +1047,16 @@ private fun AccountDialog(
     serverName: String,
     serverVersion: String,
     serverUrl: String,
+    onCollectionSettings: () -> Unit,
     onLogout: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    var collectionSettingsFocused by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Plex 계정") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
                     text = "로그인됨",
                     color = PlexGold,
@@ -1067,6 +1079,17 @@ private fun AccountDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                 )
+                Button(
+                    onClick = onCollectionSettings,
+                    modifier = Modifier.fillMaxWidth().onFocusChanged {
+                        collectionSettingsFocused = it.isFocused || it.hasFocus
+                    }.border(if (collectionSettingsFocused) 3.dp else 1.dp,
+                        if (collectionSettingsFocused) Color.White else Color.Transparent, CircleShape),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (collectionSettingsFocused) PlexGold else Color.DarkGray,
+                        contentColor = if (collectionSettingsFocused) Color.Black else Color.White,
+                    ),
+                ) { Text("시청 완료 컬렉션 설정") }
                 Button(
                     onClick = onLogout,
                     modifier = Modifier.fillMaxWidth(),

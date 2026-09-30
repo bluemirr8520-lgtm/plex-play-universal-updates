@@ -86,11 +86,11 @@ class WatchedCollectionPolicyTest {
     }
 
     @Test
-    fun onlyExactCaseSensitivePosixSpecialRootsUse123() {
+    fun commonPosixFolderNamesRemainCaseSensitive() {
         listOf(
-            "/mnt/gds2/GDRIVE/VIDEO/AV/자막B/NO_META/movie.mkv",
+            "/mnt/GDS2/gdrive/VIDEO/AV/자막B/NO_META/movie.mkv",
             "/mnt/GDS2/GDRIVE/VIDEO/AV/자막B/no_meta/movie.mkv",
-            "/mnt/GDS2/GDRIVE/VIDEO/AV/자막B/uncensored/NO_META/movie.mkv",
+            "/mnt/GDS2/GDRIVE/video/AV/자막B/NO_META/movie.mkv",
             "/mnt/GDS2/GDRIVE/VIDEO/AV/자막A/NO_META/movie.mkv",
         ).forEach { file ->
             assertEquals(file, "KILL", watchedCollectionTag("AV-자막B", "movie", file))
@@ -203,15 +203,76 @@ class WatchedCollectionPolicyTest {
     }
 
     @Test
-    fun windowsAndUncFilesAreValidButDoNotMatchThePosixExceptions() {
+    fun unrelatedWindowsAndUncFoldersRemainOrdinary() {
         listOf(
             """C:\Videos\movie.mkv""",
-            "C:/mnt/GDS2/GDRIVE/VIDEO/AV/자막B/NO_META/movie.mkv",
             """\\NAS\Media\NO_META\movie.mkv""",
-            "//mnt/GDS2/GDRIVE/VIDEO/AV/자막B/NO_META/movie.mkv",
         ).forEach { file ->
             assertEquals(file, "KILL", watchedCollectionTag("AV-자막B", "movie", file))
         }
+    }
+
+    @Test fun allFourRulesMatchDifferentMountPrefixesAndDescendants() {
+        val suffixes = specialRoots.map { it.substringAfter("/mnt/GDS2/") }
+        for (prefix in listOf("/mnt/GDS2/", "/mnt/gds2/", "/mnt/GDS9/", "/data/storage/", "/volume1/", "/")) {
+            for (suffix in suffixes) {
+                assertEquals("123", watchedCollectionTag("Movies", "movie", "$prefix$suffix/movie.mkv"))
+                assertEquals("123", watchedCollectionTag("TV", "episode", "$prefix$suffix/nested/movie.mkv"))
+            }
+        }
+    }
+
+    @Test fun windowsAndUncCommonPhysicalFoldersAlsoMatch() {
+        for (file in listOf(
+            "D:/GDRIVE/VIDEO/AV/자막B/NO_META/movie.mkv",
+            """Z:\Media\gdrive\video\av\자막B\western\no_meta\movie.mkv""",
+            "//NAS/Media/GDRIVE/VIDEO/AV/자막B/기타/movie.mkv",
+            "//mnt/GDS2/GDRIVE/VIDEO/AV/자막B/NO_META/movie.mkv",
+        )) assertEquals(file, "123", watchedCollectionTag("TV", "episode", file))
+    }
+
+    @Test fun commonRuleRequiresAllComponentsAndNeverMatchesPartialNamesOrUncHosts() {
+        for (file in listOf(
+            "/mnt/AV/자막B/NO_META/a.mkv",
+            "/mnt/OTHERGDRIVE/VIDEO/AV/자막B/NO_META/a.mkv",
+            "/mnt/GDRIVE/VIDEO2/AV/자막B/NO_META/a.mkv",
+            "/mnt/GDRIVE/VIDEO/AV/자막B2/NO_META/a.mkv",
+            "/mnt/GDRIVE/VIDEO/AV/자막B/NO_META2/a.mkv",
+            "/mnt/GDRIVE/VIDEO/AV/자막B/NO_META.mkv",
+            "//GDRIVE/VIDEO/AV/자막B/NO_META/a.mkv",
+            "/mnt/GDRIVE%2FVIDEO/AV/자막B/NO_META/a.mkv",
+        )) assertEquals(file, "KILL", watchedCollectionTag("TV", "episode", file))
+    }
+
+    @Test fun noMetaAtAnyDepthBelowCommonBaseUsesSpecialRule() {
+        for (prefix in listOf("/mnt/GDS2", "/mnt/GDS9", "/data/backup")) {
+            for (tail in listOf("NO_META", "uncensored/NO_META", "NewFolder/NO_META",
+                "NewFolder/2026/NO_META", "A/B/C/NO_META/Season 1", "NO_META/A/NO_META/B")) {
+                assertEquals("123", watchedCollectionTag("TV", "episode", "$prefix/GDRIVE/VIDEO/AV/자막B/$tail/a.mkv"))
+            }
+        }
+        assertEquals("123", watchedCollectionTag("TV", "episode",
+            "D:/mount/GDRIVE/VIDEO/AV/자막B/any/depth/no_meta/season/a.mkv"))
+    }
+
+    @Test fun noMetaMustBeAWholeFolderBelowTheCorrectBase() {
+        for (path in listOf(
+            "/NO_META/GDRIVE/VIDEO/AV/자막B/Normal/a.mkv",
+            "/data/GDRIVE/VIDEO/AV/자막B/A/B/NO_META2/a.mkv",
+            "/data/GDRIVE/VIDEO/AV/자막B/A/B/MY_NO_META/a.mkv",
+            "/data/GDRIVE/VIDEO/AV/자막B/A/B/NO_META.mkv",
+            "/data/GDRIVE/VIDEO/AV/자막A/A/B/NO_META/a.mkv",
+            "/data/GDRIVE/VIDEO/AV/자막B/A/기타/a.mkv",
+        )) assertEquals(path, "KILL", watchedCollectionTag("TV", "episode", path))
+    }
+
+    @Test fun deepNoMetaAndExistingOtherFolderAgreeForManualCompletionWithCustomNames() {
+        val paths = listOf("/mnt/GDS2/GDRIVE/VIDEO/AV/자막B/New/A/NO_META/1.mkv",
+            "/data/GDRIVE/VIDEO/AV/자막B/New/B/NO_META/2.mkv",
+            "/data/GDRIVE/VIDEO/AV/자막B/기타/Sub/3.mkv")
+        val settings = WatchedCollectionSettings("완료", "예외 영상")
+        assertEquals("예외 영상", manualWatchedCollectionTag("TV", "episode", paths, settings))
+        assertNull(manualWatchedCollectionTag("TV", "episode", paths + "/data/normal/a.mkv", settings))
     }
 
     @Test

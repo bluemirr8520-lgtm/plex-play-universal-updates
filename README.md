@@ -9,6 +9,14 @@ Android 기본 디코더가 열지 못하는 영상·오디오를 로컬 범용 
 
 GitHub 배포 APK는 [비공개 릴리스](https://github.com/bluemirr8520-lgtm/plex-play-universal-updates/releases)의 `PlexPlayUniversal.apk`를 사용합니다. 로컬 `*-debug.apk` 테스트 파일과는 빌드 구성이 다르며, 배포 절차는 기존 고정 인증서가 일치하고 테스트·무결성 검사를 통과할 때만 새 버전을 게시합니다. 해당 저장소에 접근 가능한 GitHub 계정으로 로그인해야 다운로드할 수 있습니다.
 
+## 1.0.29 변경 사항
+
+- 홈 → 계정 → ‘시청 완료 컬렉션 설정’에서 일반 컬렉션명(기본 KILL)과 예외 경로 컬렉션명(기본 123)을 각각 저장할 수 있습니다.
+- 설정은 기기에 보관되며 앱 재실행·업데이트 후에도 유지합니다. 자동 완료, 수동 완료와 시리즈 완료에 동일하게 적용합니다.
+- 예외 경로는 마운트 앞부분과 무관하게 `GDRIVE/VIDEO/AV/자막B/` 아래 모든 깊이의 NO_META 폴더와 그 하위 폴더로 판별합니다. 기존 바로 아래의 기타 및 하위 폴더 규칙도 유지합니다.
+- 전체 폴더 이름 단위로 비교하여 NO_META2 등의 비슷한 이름은 제외합니다. Linux는 대소문자를 구분하며 Windows/UNC 경로도 처리합니다.
+- 이름 저장만으로 기존 Plex 컬렉션을 일괄 변경하지 않습니다. 다음 시청 완료부터 대상 항목의 기존 컬렉션을 지정 이름 하나로 교체합니다.
+
 ## 1.0.28 변경 사항
 
 - 시리즈·시즌의 완료 표시를 서버의 전체 에피소드 수와 시청 완료 에피소드 수로 판정하여, 상세 화면에 다시 들어갔을 때 표시가 풀리는 문제를 수정했습니다.
@@ -174,7 +182,7 @@ AAC, AC-3, E-AC-3, TrueHD, DTS, FLAC, Vorbis, Opus 계열 오디오를 폭넓게
 
 - 앱 이름: `Plex Play Universal`
 - applicationId: `io.mirr.plexplay.universal`
-- 현재 버전: `1.0.28` (버전 코드 `29`)
+- 현재 버전: `1.0.29` (버전 코드 `30`)
 - 업데이트 채널: `bluemirr8520-lgtm/plex-play-universal-updates`
 - 정식 배포 APK 파일명: `PlexPlayUniversal.apk`
 

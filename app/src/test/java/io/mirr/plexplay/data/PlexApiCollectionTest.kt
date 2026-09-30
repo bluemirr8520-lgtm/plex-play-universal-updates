@@ -16,6 +16,15 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 class PlexApiCollectionTest {
+    @Test fun userDefinedCollectionNameIsEncodedAndVerifiedWithoutHardcodedTags() = runBlocking {
+        val name = "시청 완료, A+B & C"
+        val xml = metadata("시청 완료, A+B &amp; C")
+        TestServer(metadata = xml).use { server ->
+            server.api.replaceCollectionTag("7", "42", "movie", name, listOf("KILL", "123"))
+            assertEquals(name, server.requests.first().query["collection[0].tag.tag"])
+            assertEquals("KILL,123", server.requests.first().query["collection[].tag.tag-"])
+        }
+    }
     private fun seriesItem() = PlexItem("42", "/library/metadata/42", "show", "Series", librarySectionId = "7")
 
     private fun seriesMetadata(viewed: Int, sectionId: String = "7") =

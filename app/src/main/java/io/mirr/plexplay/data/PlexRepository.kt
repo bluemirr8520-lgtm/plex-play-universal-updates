@@ -2,6 +2,8 @@ package io.mirr.plexplay.data
 
 import io.mirr.plexplay.BuildConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.supervisorScope
 import java.net.URLEncoder
@@ -26,6 +28,12 @@ class PlexRepository(
         store.savePlaybackQuality(quality)
 
     fun autoPlayNext(): Boolean = store.autoPlayNext()
+
+    fun watchedCollectionSettings(): WatchedCollectionSettings = store.watchedCollectionSettings()
+
+    suspend fun saveWatchedCollectionSettings(settings: WatchedCollectionSettings) = withContext(Dispatchers.IO) {
+        store.saveWatchedCollectionSettings(settings)
+    }
 
     fun saveAutoPlayNext(enabled: Boolean) =
         store.saveAutoPlayNext(enabled)
@@ -174,6 +182,7 @@ class PlexRepository(
 
     suspend fun markWatchedWithCollection(item: PlexItem): WatchedActionResult {
         val connection = store.load()
+        val collectionSettings = store.watchedCollectionSettings()
         val api = api(connection)
         var saved: PlexItem? = null
         val notice = saveWatchedWithCollection(
@@ -186,9 +195,9 @@ class PlexRepository(
                     return@saveWatchedWithCollection null
                 }
                 val tag = if (resolved.type == "show") {
-                    seriesWatchedCollectionTag(section.title, resolved, api.seriesEpisodes(resolved.ratingKey))
+                    seriesWatchedCollectionTag(section.title, resolved, api.seriesEpisodes(resolved.ratingKey), collectionSettings)
                 } else {
-                    manualWatchedCollectionTag(section.title, resolved.type, resolved.mediaFilePaths)
+                    manualWatchedCollectionTag(section.title, resolved.type, resolved.mediaFilePaths, collectionSettings)
                 }
                     ?: throw PlexException("파일 경로가 불명확하거나 여러 파일 버전의 규칙이 달라 컬렉션을 변경하지 않았습니다.")
                 if (store.load() != connection) throw PlexException("서버 연결이 변경되어 컬렉션 변경을 중지했습니다.")
@@ -213,6 +222,7 @@ class PlexRepository(
         knownSections: List<PlexSection>,
     ): String? {
         val connection = validatedPlaybackConnection(source, store.load()) ?: return null
+        val collectionSettings = store.watchedCollectionSettings()
         val knownSection = knownSections.firstOrNull { it.key == knownItem?.librarySectionId }
         if (knownItem != null && knownSection != null &&
             !managesWatchedCollections(knownSection.title, knownItem.type)
@@ -224,7 +234,7 @@ class PlexRepository(
         val section = api.sections().firstOrNull { it.key == item.librarySectionId }
             ?: throw PlexException("재생 완료 영상의 라이브러리를 확인하지 못했습니다.")
         if (!managesWatchedCollections(section.title, item.type)) return null
-        val tag = watchedCollectionTag(section.title, item.type, source.filePath)
+        val tag = watchedCollectionTag(section.title, item.type, source.filePath, collectionSettings)
             ?: throw PlexException("실제 재생 파일 경로를 확인할 수 없어 컬렉션을 변경하지 않았습니다.")
         val mediaType = if (item.type == "video" && section.type == "movie") "movie" else item.type
         // A user may sign out or switch servers while the metadata request is pending.
