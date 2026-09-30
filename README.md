@@ -7,7 +7,9 @@ Android 기본 디코더가 열지 못하는 영상·오디오를 로컬 범용 
 
 현재 개발·배포 대상은 Universal입니다. 기존 Plex Play는 더 이상 새 버전을 빌드하거나 배포하지 않습니다.
 
-GitHub 배포 APK는 [비공개 릴리스](https://github.com/bluemirr8520-lgtm/plex-play-universal-updates/releases)의 `PlexPlayUniversal.apk`를 사용합니다. 로컬 `*-debug.apk` 테스트 파일과는 빌드 구성이 다르며, 배포 절차는 기존 고정 인증서가 일치하고 테스트·무결성 검사를 통과할 때만 새 버전을 게시합니다. 해당 저장소에 접근 가능한 GitHub 계정으로 로그인해야 다운로드할 수 있습니다.
+GitHub 배포 APK는 [최신 공개 릴리스](https://github.com/bluemirr8520-lgtm/plex-play-universal-updates/releases/latest)의 `PlexPlayUniversal.apk`를 사용합니다. GitHub 로그인 없이 다운로드할 수 있습니다. 로컬 `*-debug.apk` 테스트 파일과는 빌드 구성이 다르며, 배포 절차는 기존 고정 인증서가 일치하고 테스트·무결성 검사를 통과할 때만 새 버전을 게시합니다.
+
+2026-09-30 배포 목록은 최신 **v1.0.31 하나로 통합**합니다. 이전 릴리스의 첨부·설명은 로컬 백업으로 보존하고 Git 태그·소스 이력은 유지합니다. 최신 APK를 다시 빌드하거나 변경하는 작업은 아닙니다. 빌드용 `libvlc-all-3.7.5.aar`도 같은 최신 릴리스에서 제공합니다. 자세한 정리 범위는 [릴리스 정리 기록](RELEASE_CLEANUP_2026-09-30.md)을 참고하세요.
 
 ## 1.0.31 변경 사항
 
@@ -210,7 +212,9 @@ JDK 17과 Android SDK 36이 필요합니다.
 .\gradlew.bat assembleRelease
 ```
 
-범용 코덱은 `app/libs/libvlc-all-3.7.5.aar`에 포함되어 있습니다. 모든 ABI를 한 APK에
+소스에서 빌드하려면 [v1.0.31의 libvlc-all-3.7.5.aar](https://github.com/bluemirr8520-lgtm/plex-play-universal-updates/releases/download/v1.0.31/libvlc-all-3.7.5.aar)를 내려받아 `app/libs/`에 넣으세요. SHA-256은 `2c25507adb1260aa4d81aad8c2ce98765d98026b9381f49ea454d0b8092f21cb`입니다. GitHub Actions도 이 위치와 해시를 사용합니다. 일반 설치자는 AAR 파일을 받을 필요 없이 APK만 설치하면 됩니다.
+
+범용 코덱은 APK 내부에 포함됩니다. 모든 ABI를 한 APK에
 담기 때문에 기본 앱보다 APK가 큽니다. 실제 배포에서는 동일한 서명 키를 계속 보관해야
 이후 버전을 덮어쓸 수 있습니다.
 
