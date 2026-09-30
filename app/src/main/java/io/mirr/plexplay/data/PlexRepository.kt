@@ -183,8 +183,8 @@ class PlexRepository(
                 val section = api.sections().firstOrNull { it.key == resolved.librarySectionId }
                     ?: throw PlexException("영상의 라이브러리를 확인하지 못했습니다.")
                 if (!managesWatchedCollections(section.title, resolved.type)) return@saveWatchedWithCollection null
-                val tag = watchedCollectionTag(section.title, resolved.type, resolved.filePath)
-                    ?: throw PlexException("실제 파일 경로를 확인할 수 없어 컬렉션을 변경하지 않았습니다.")
+                val tag = manualWatchedCollectionTag(section.title, resolved.type, resolved.mediaFilePaths)
+                    ?: throw PlexException("파일 경로가 불명확하거나 여러 파일 버전의 규칙이 달라 컬렉션을 변경하지 않았습니다.")
                 if (store.load() != connection) throw PlexException("서버 연결이 변경되어 컬렉션 변경을 중지했습니다.")
                 api.replaceCollectionTag(
                     sectionId = section.key,

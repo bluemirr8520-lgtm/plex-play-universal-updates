@@ -66,6 +66,9 @@ data class PlexItem(
     val leafCount: Int = 0,
     val viewedLeafCount: Int = 0,
     val childCount: Int = 0,
+    // All original Part.file values, including blanks for unresolved versions.
+    // filePath remains the selected playback Part.
+    val mediaFilePaths: List<String> = emptyList(),
 ) {
     val isPlayable: Boolean
         get() = type in setOf("movie", "episode", "clip", "video", "track") || partKey != null

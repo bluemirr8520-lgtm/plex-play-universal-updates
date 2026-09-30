@@ -162,7 +162,7 @@ class PlexApi(
         // Indexed tags append in PMS. Remove every other existing collection
         // explicitly; disjoint add/remove names make processing order irrelevant.
         val removedTags = existingCollections.filter { it.isNotBlank() && it != tag }.distinct()
-        request<Unit>(
+        if (existingCollections.toSet() != setOf(tag)) request<Unit>(
             path = "/library/sections/$sectionId/all",
             query = buildMap {
                 put("id", ratingKey)
@@ -180,7 +180,7 @@ class PlexApi(
         ) { }
 
         val updated = metadata(ratingKey).singleOrNull { it.ratingKey == ratingKey }
-        if (updated?.collections?.toSet() != setOf(tag)) {
+        if (updated == null || updated.librarySectionId != sectionId || updated.collections.toSet() != setOf(tag)) {
             throw PlexException("Plex 컬렉션 변경 결과를 확인하지 못했습니다. 지정한 컬렉션만 적용되지 않았습니다.")
         }
     }
@@ -263,7 +263,10 @@ class PlexApi(
             .getOrElse { throw PlexException("서버 주소가 올바르지 않습니다.", it) }
 
         var lastError: Exception? = null
-        for (attempt in 0..1) {
+        // A PUT may have succeeded even if its response was lost. Never replay
+        // metadata changes automatically; let the caller report partial success.
+        val attempts = if (method == "GET") 2 else 1
+        for (attempt in 0 until attempts) {
             val http = (url.openConnection() as HttpURLConnection).apply {
                 connectTimeout = 10_000
                 readTimeout = 30_000
@@ -294,7 +297,7 @@ class PlexApi(
                 throw error
             } catch (error: Exception) {
                 lastError = error
-                if (attempt == 1) break
+                if (attempt == attempts - 1) break
             } finally {
                 http.disconnect()
             }

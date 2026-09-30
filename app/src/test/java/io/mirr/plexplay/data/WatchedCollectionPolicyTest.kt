@@ -95,11 +95,37 @@ class WatchedCollectionPolicyTest {
     }
 
     @Test
-    fun dotSegmentsAreResolvedBeforeSpecialFolderSelection() {
+    fun parentTraversalIsRejectedInsteadOfGuessingTheReplacementTag() {
         val root = specialRoots.first()
-        assertEquals("123", watchedCollectionTag("AV-자막B", "movie", "$root/./nested/../movie.mkv"))
-        assertEquals("KILL", watchedCollectionTag("AV-자막B", "movie", "$root/../movie.mkv"))
+        assertEquals("123", watchedCollectionTag("AV-자막B", "movie", "$root/./movie.mkv"))
+        assertNull(watchedCollectionTag("AV-자막B", "movie", "$root/./nested/../movie.mkv"))
+        assertNull(watchedCollectionTag("AV-자막B", "movie", "$root/../movie.mkv"))
         assertNull(watchedCollectionTag("AV-자막B", "movie", "/../../movie.mkv"))
+    }
+
+    @Test fun manualCompletionRequiresEveryVersionToAgree() {
+        assertEquals("KILL", manualWatchedCollectionTag("AV1", "movie", listOf("/video/a.mkv", "/video/b.mkv")))
+        assertEquals("123", manualWatchedCollectionTag("AV1", "movie", specialRoots.map { "$it/movie.mkv" }))
+        assertNull(manualWatchedCollectionTag("AV1", "movie", listOf("/video/a.mkv", "${specialRoots.first()}/a.mkv")))
+    }
+
+    @Test fun manualCompletionDoesNotIgnoreAnyMissingVersionPath() {
+        assertNull(manualWatchedCollectionTag("AV1", "movie", emptyList()))
+        for (missing in listOf("", " ", "relative.mkv", "https://server/video")) {
+            assertNull(manualWatchedCollectionTag("AV1", "movie", listOf("/video/a.mkv", missing)))
+        }
+    }
+
+    @Test fun manualCompletionNeverExpandsLibraryOrMediaScope() {
+        assertNull(manualWatchedCollectionTag("Movies", "movie", listOf("/video/a.mkv")))
+        assertNull(manualWatchedCollectionTag("AV1", "show", listOf("/video/a.mkv")))
+        assertNull(manualWatchedCollectionTag("AV1", "season", listOf("/video/a.mkv")))
+    }
+
+    @Test fun controlCharactersAreRejectedForCollectionDecisions() {
+        for (char in listOf('\n', '\r', '\t', '\u0000')) {
+            assertNull(watchedCollectionTag("AV1", "movie", "/video/${char}a.mkv"))
+        }
     }
 
     @Test

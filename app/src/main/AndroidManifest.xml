@@ -12,6 +12,7 @@
         android:name="android.hardware.touchscreen"
         android:required="false" />
 
+
     <application
         android:allowBackup="false"
         android:banner="@drawable/tv_banner"
@@ -31,6 +32,7 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/update_file_paths" />
         </provider>
+
 
         <activity
             android:name=".MainActivity"

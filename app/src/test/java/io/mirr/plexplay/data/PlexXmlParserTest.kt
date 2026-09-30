@@ -5,6 +5,34 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class PlexXmlParserTest {
+    @Test fun allPartPathsAreRetainedWithoutChangingSelectedPlaybackPart() {
+        val xml = """
+            <MediaContainer librarySectionID="7">
+              <Video ratingKey="42" type="movie">
+                <Media><Part key="/a" file="/video/a.mkv"/><Part key="/b" file="/video/b.mkv"/></Media>
+                <Media><Part key="/c" file="/video/c.mkv"/></Media>
+                <Extras><Video ratingKey="43"><Media><Part key="/extra" file="/extra/ignored.mkv"/></Media></Video></Extras>
+              </Video>
+              <Video ratingKey="44" type="movie"><Media><Part key="/d" file="/video/d.mkv"/></Media></Video>
+            </MediaContainer>
+        """.trimIndent()
+        val items = PlexXmlParser.items(ByteArrayInputStream(xml.toByteArray()))
+        assertEquals(listOf("/video/a.mkv", "/video/b.mkv", "/video/c.mkv"), items[0].mediaFilePaths)
+        assertEquals("/video/c.mkv", items[0].filePath)
+        assertEquals("/c", items[0].partKey)
+        assertEquals(listOf("/video/d.mkv"), items[1].mediaFilePaths)
+    }
+
+    @Test fun unresolvedVersionPathIsRetainedAsACollectionSafetyMarker() {
+        val xml = """<MediaContainer><Video ratingKey="42" type="movie">
+            <Media><Part key="/missing"/></Media>
+            <Media><Part key="/valid" file="/video/a.mkv"/></Media>
+            </Video></MediaContainer>"""
+        val item = PlexXmlParser.items(ByteArrayInputStream(xml.toByteArray())).single()
+        assertEquals(listOf("", "/video/a.mkv"), item.mediaFilePaths)
+        assertEquals("/video/a.mkv", item.filePath)
+    }
+
     @Test
     fun collectionsPreserveFirstOccurrenceOrderAndIgnoreEmptyTags() {
         val xml = """

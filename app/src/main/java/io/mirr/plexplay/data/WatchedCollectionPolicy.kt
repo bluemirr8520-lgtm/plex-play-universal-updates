@@ -32,6 +32,11 @@ internal fun watchedCollectionTag(
     filePath: String?,
 ): String? {
     if (!managesWatchedCollections(libraryTitle, mediaType)) return null
+    // Unusual physical paths are ambiguous for a destructive tag replacement.
+    // This guard does not change playback-folder navigation's normalization.
+    if (filePath == null || filePath.any { it.code < 32 } ||
+        filePath.replace('\\', '/').split('/').any { it == ".." }
+    ) return null
     val folder = playbackFolderKey(filePath) ?: return null
     if (PlexApiFolders.any { folder == it || folder.startsWith("$it/") }) return null
     return if (WatchedCollectionSpecialFolders.any { folder == it || folder.startsWith("$it/") }) {
@@ -39,4 +44,16 @@ internal fun watchedCollectionTag(
     } else {
         "KILL"
     }
+}
+
+/** Manual completion has no played Part: every version must agree on one rule. */
+internal fun manualWatchedCollectionTag(
+    libraryTitle: String?,
+    mediaType: String,
+    filePaths: List<String>,
+): String? {
+    if (filePaths.isEmpty()) return null
+    val tags = filePaths.map { watchedCollectionTag(libraryTitle, mediaType, it) }
+    if (tags.any { it == null }) return null
+    return tags.distinct().singleOrNull()
 }

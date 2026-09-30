@@ -120,6 +120,38 @@ class PlexApiCollectionTest {
         }
     }
 
+    @Test fun alreadyCorrectCollectionIsReadBackWithoutAnotherPut() = runBlocking {
+        TestServer(metadata = metadata("KILL"), writeExpected = false).use { server ->
+            server.api.replaceCollectionTag("7", "42", "movie", "KILL", listOf("KILL"))
+            assertEquals(1, server.requests.size)
+            assertEquals("GET", server.requests.single().method)
+            assertEquals("/library/metadata/42", server.requests.single().path)
+        }
+    }
+
+    @Test fun alreadyCorrectSnapshotIsNotTrustedIfServerHasChanged() = runBlocking {
+        TestServer(metadata = metadata("Old"), writeExpected = false).use { server ->
+            expectPlexFailure { server.api.replaceCollectionTag("7", "42", "movie", "KILL", listOf("KILL")) }
+            assertEquals(listOf("GET"), server.requests.map { it.method })
+        }
+    }
+
+    @Test fun verificationRejectsAnotherLibraryEvenWithTheSameTag() = runBlocking {
+        TestServer(metadata = metadata("KILL", sectionId = "8")).use { server ->
+            expectPlexFailure { server.api.replaceCollectionTag("7", "42", "movie", "KILL", listOf("Old")) }
+            assertEquals(listOf("PUT", "GET"), server.requests.map { it.method })
+        }
+    }
+
+    @Test fun serverFailureDoesNotRepeatCollectionWrites() = runBlocking {
+        for (status in listOf(500, 503)) {
+            TestServer(metadata = metadata("KILL"), writeStatus = status).use { server ->
+                expectPlexFailure { server.api.replaceCollectionTag("7", "42", "movie", "KILL", listOf("Old")) }
+                assertEquals(listOf("PUT"), server.requests.map { it.method })
+            }
+        }
+    }
+
     private suspend fun expectPlexFailure(block: suspend () -> Unit): PlexException {
         try {
             block()
@@ -138,9 +170,11 @@ class PlexApiCollectionTest {
         val token: String?,
     )
 
-    private class TestServer(metadata: String, writeStatus: Int = 200) : AutoCloseable {
+    private class TestServer(metadata: String, writeStatus: Int = 200, writeExpected: Boolean = true) : AutoCloseable {
         val requests = CopyOnWriteArrayList<CapturedRequest>()
-        private val responses = ConcurrentLinkedQueue(listOf(writeStatus to "", 200 to metadata))
+        private val responses = ConcurrentLinkedQueue(
+            if (writeExpected) listOf(writeStatus to "", 200 to metadata) else listOf(200 to metadata),
+        )
         private val server = ServerSocket().apply { bind(InetSocketAddress("127.0.0.1", 0)) }
         @Volatile private var running = true
         @Volatile private var activeSocket: Socket? = null
@@ -226,8 +260,8 @@ class PlexApiCollectionTest {
     companion object {
         private fun decode(value: String): String = URLDecoder.decode(value, Charsets.UTF_8.name())
 
-        private fun metadata(vararg tags: String, ratingKey: String = "42", type: String = "movie"): String =
-            """<MediaContainer size="1"><Video ratingKey="$ratingKey" key="/library/metadata/$ratingKey" type="$type" title="Fixture">""" +
+        private fun metadata(vararg tags: String, ratingKey: String = "42", type: String = "movie", sectionId: String = "7"): String =
+            """<MediaContainer size="1" librarySectionID="$sectionId"><Video ratingKey="$ratingKey" key="/library/metadata/$ratingKey" type="$type" title="Fixture">""" +
                 tags.joinToString("") { """<Collection tag="$it"/>""" } +
                 """<Genre tag="Unchanged Genre"/><Role tag="Unchanged Actor"/></Video></MediaContainer>"""
     }

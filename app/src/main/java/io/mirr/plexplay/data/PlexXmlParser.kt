@@ -92,6 +92,7 @@ internal object PlexXmlParser {
                     "Part" -> {
                         val media = currentMedia
                         if (media != null) {
+                            media.mediaFilePaths.add(parser.attr("file").orEmpty())
                             partIndex++
                             currentPartKey = parser.attr("key")
                             // Each Part starts from its Media's attributes, never a sibling's streams.
@@ -264,6 +265,7 @@ internal object PlexXmlParser {
         val genres: MutableList<PlexTag> = mutableListOf(),
         val collections: MutableList<String> = mutableListOf(),
         val subtitles: MutableList<PlexSubtitle> = mutableListOf(),
+        val mediaFilePaths: MutableList<String> = mutableListOf(),
     ) {
         fun forMedia(parser: XmlPullParser) = copy(
             partKey = null,
@@ -334,6 +336,7 @@ internal object PlexXmlParser {
             leafCount = leafCount,
             viewedLeafCount = viewedLeafCount,
             childCount = childCount,
+            mediaFilePaths = mediaFilePaths.toList(),
         )
 
         companion object {

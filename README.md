@@ -9,6 +9,14 @@ Android 기본 디코더가 열지 못하는 영상·오디오를 로컬 범용 
 
 GitHub 배포 APK는 [비공개 릴리스](https://github.com/bluemirr8520-lgtm/plex-play-universal-updates/releases)의 `PlexPlayUniversal.apk`를 사용합니다. 로컬 `*-debug.apk` 테스트 파일과는 빌드 구성이 다르며, 배포 절차는 기존 고정 인증서가 일치하고 테스트·무결성 검사를 통과할 때만 새 버전을 게시합니다. 해당 저장소에 접근 가능한 GitHub 계정으로 로그인해야 다운로드할 수 있습니다.
 
+## 1.0.26 변경 사항
+
+- 시청 완료 컬렉션의 기존 KILL/123 규칙을 유지하며, 수동 완료는 모든 파일 버전의 경로가 같은 규칙인지 확인합니다.
+- 경로가 누락되거나 규칙이 충돌하면 컬렉션은 변경하지 않고 시청 완료 기록을 유지합니다.
+- 이미 지정 태그 하나만 있으면 중복 저장 없이 서버 결과를 확인합니다. 라이브러리 식별자도 함께 검증합니다.
+- 컬렉션 저장 중 통신 오류가 나면 앱이 쓰기 요청을 자동 반복하지 않습니다.
+- 기존 완료 목록을 자동으로 재처리하거나 일괄 적용 버튼을 추가하지 않습니다.
+
 ## 1.0.25 변경 사항
 
 - 라이브러리 진입 시 이어보기 목록을 새로 불러오고 전체 목록 위에 표시합니다.
@@ -150,9 +158,9 @@ AAC, AC-3, E-AC-3, TrueHD, DTS, FLAC, Vorbis, Opus 계열 오디오를 폭넓게
 
 - 앱 이름: `Plex Play Universal`
 - applicationId: `io.mirr.plexplay.universal`
-- 현재 버전: `1.0.19` (버전 코드 `20`)
+- 현재 버전: `1.0.26` (버전 코드 `27`)
 - 업데이트 채널: `bluemirr8520-lgtm/plex-play-universal-updates`
-- 정식 배포 APK 파일명: `PlexPlayUniversal.apk` / 로컬 테스트: `PlexPlayUniversal-1.0.19-debug.apk`
+- 정식 배포 APK 파일명: `PlexPlayUniversal.apk`
 
 ## 빌드
 
