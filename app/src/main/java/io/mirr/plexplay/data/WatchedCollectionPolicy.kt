@@ -1,12 +1,5 @@
 package io.mirr.plexplay.data
 
-private val WatchedCollectionLibraries = setOf(
-    "AV-모자이크제거",
-    "AV-자막A",
-    "AV-자막B",
-    "AV1",
-)
-
 private val WatchedCollectionVideoTypes = setOf("movie", "episode", "clip", "video")
 
 private val WatchedCollectionSpecialFolders = listOf(
@@ -22,8 +15,10 @@ private val PlexApiFolders = listOf(
     "posix:/video/:/transcode",
 )
 
+// The repository resolves the item's actual registered section before calling
+// this policy. New or renamed libraries must not require an app allowlist update.
 internal fun managesWatchedCollections(libraryTitle: String?, mediaType: String): Boolean =
-    libraryTitle in WatchedCollectionLibraries && mediaType in WatchedCollectionVideoTypes
+    !libraryTitle.isNullOrBlank() && mediaType in WatchedCollectionVideoTypes
 
 /** filePath must come from the played Part.file, not Part.key or a playback URL. */
 internal fun watchedCollectionTag(

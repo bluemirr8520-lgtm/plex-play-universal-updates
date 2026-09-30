@@ -7,7 +7,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WatchedCollectionPolicyTest {
-    private val libraries = listOf("AV-모자이크제거", "AV-자막A", "AV-자막B", "AV1")
+    private val libraries = listOf(
+        "AV-모자이크제거", "AV-자막A", "AV-자막B", "AV1",
+        "Movies", "VOD 드라마", "TV Shows", "애니메이션", "Home Videos", "새 라이브러리 2026",
+    )
     private val specialRoots = listOf(
         "/mnt/GDS2/GDRIVE/VIDEO/AV/자막B/NO_META",
         "/mnt/GDS2/GDRIVE/VIDEO/AV/자막B/Uncensored/NO_META",
@@ -26,8 +29,8 @@ class WatchedCollectionPolicyTest {
     }
 
     @Test
-    fun managementEligibilityExcludesOtherLibrariesAndNonVideoItems() {
-        listOf(null, "", "Movies", "AV2", "av1", "AV1 ").forEach { library ->
+    fun managementEligibilityExcludesMissingLibrariesAndNonVideoItems() {
+        listOf(null, "", " ", "\t").forEach { library ->
             assertFalse(managesWatchedCollections(library, "movie"))
         }
         listOf("track", "album", "show", "season", "collection", "photo", "", "Movie").forEach { type ->
@@ -116,10 +119,13 @@ class WatchedCollectionPolicyTest {
         }
     }
 
-    @Test fun manualCompletionNeverExpandsLibraryOrMediaScope() {
-        assertNull(manualWatchedCollectionTag("Movies", "movie", listOf("/video/a.mkv")))
-        assertNull(manualWatchedCollectionTag("AV1", "show", listOf("/video/a.mkv")))
-        assertNull(manualWatchedCollectionTag("AV1", "season", listOf("/video/a.mkv")))
+    @Test fun manualCompletionKeepsTheIndividualVideoScopeInAllLibraries() {
+        libraries.forEach { library ->
+            assertEquals("KILL", manualWatchedCollectionTag(library, "movie", listOf("/video/a.mkv")))
+            assertNull(manualWatchedCollectionTag(library, "show", listOf("/video/a.mkv")))
+            assertNull(manualWatchedCollectionTag(library, "season", listOf("/video/a.mkv")))
+            assertNull(manualWatchedCollectionTag(library, "track", listOf("/video/a.mkv")))
+        }
     }
 
     @Test fun controlCharactersAreRejectedForCollectionDecisions() {
@@ -129,10 +135,28 @@ class WatchedCollectionPolicyTest {
     }
 
     @Test
-    fun libraryNamesMustMatchExactlyEvenForSpecialFiles() {
-        listOf(null, "", "AV", "AV2", "Movies", "av1", "AV1 ", " AV1", "AV-자막B2").forEach { library ->
+    fun unknownLibraryIsStillRejectedEvenForSpecialFiles() {
+        listOf(null, "", " ", "\t").forEach { library ->
             assertNull(watchedCollectionTag(library, "movie", "${specialRoots.first()}/movie.mkv"))
             assertNull(watchedCollectionTag(library, "movie", "/video/movie.mkv"))
+        }
+    }
+
+    @Test fun newlyAddedOrRenamedLibraryDoesNotRequireAnAppUpdate() {
+        listOf("AV", "AV2", "av1", "AV1 ", " AV1", "AV-자막B2", "영화 / UHD", "개인 보관함 🎬").forEach { library ->
+            assertEquals("KILL", watchedCollectionTag(library, "movie", "/video/movie.mkv"))
+            assertEquals("123", watchedCollectionTag(library, "movie", "${specialRoots.first()}/movie.mkv"))
+        }
+    }
+
+    @Test fun manualAndPlaybackCompletionShareRulesForEveryLibraryAndVideoType() {
+        libraries.forEach { library ->
+            listOf("movie", "episode", "clip", "video").forEach { type ->
+                (listOf("/video/movie.mkv") + specialRoots.map { "$it/movie.mkv" }).forEach { path ->
+                    assertEquals(watchedCollectionTag(library, type, path), manualWatchedCollectionTag(library, type, listOf(path)))
+                }
+                assertNull(manualWatchedCollectionTag(library, type, listOf("/video/movie.mkv", "${specialRoots.first()}/movie.mkv")))
+            }
         }
     }
 
