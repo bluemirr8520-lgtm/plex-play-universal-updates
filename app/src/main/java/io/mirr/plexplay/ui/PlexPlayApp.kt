@@ -117,6 +117,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -331,6 +332,14 @@ private fun LibraryScreen(
     val useSideNavigation = isTelevision || configuration.screenWidthDp >= 840
     val homeActionFocusRequester = remember { FocusRequester() }
     var homeSearchExpanded by rememberSaveable { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val goHome: () -> Unit = {
+        homeSearchExpanded = false
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
+        onHome()
+    }
     LaunchedEffect(useSideNavigation) {
         if (useSideNavigation) {
             delay(180)
@@ -354,7 +363,7 @@ private fun LibraryScreen(
             PlexNavigationSidebar(
                 state = state,
                 homeFocusRequester = homeActionFocusRequester,
-                onHome = onHome,
+                onHome = goHome,
                 onSearch = {
                     homeSearchExpanded = true
                     if (!state.isHome) onHome()
@@ -375,7 +384,24 @@ private fun LibraryScreen(
                     containerColor = MaterialTheme.colorScheme.background.copy(alpha = .96f),
                 ),
                 navigationIcon = {
-                    if (state.canNavigateBack) {
+                    if (!state.isHome) {
+                        Row(
+                            modifier = Modifier.padding(start = 8.dp, end = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            if (state.canNavigateBack) {
+                                IconButton(onClick = { onBack() }) {
+                                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, "뒤로")
+                                }
+                            }
+                            OttTopActionButton(
+                                label = "홈",
+                                icon = Icons.Rounded.Home,
+                                onClick = goHome,
+                            )
+                        }
+                    } else if (state.canNavigateBack) {
                         IconButton(onClick = { onBack() }) {
                             Icon(Icons.AutoMirrored.Rounded.ArrowBack, "뒤로")
                         }
@@ -421,7 +447,7 @@ private fun LibraryScreen(
                                 )
                             }
                         }
-                        if (!state.isHome) {
+                        if (!state.isHome && useSideNavigation) {
                             Spacer(Modifier.width(12.dp))
                             LibrarySearchField(
                                 query = state.query,
@@ -476,6 +502,17 @@ private fun LibraryScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
+            // Keep the title and Home/Back controls readable on narrow phones.
+            if (!state.isHome && !useSideNavigation) {
+                LibrarySearchField(
+                    query = state.query,
+                    onQueryChange = onQueryChange,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .height(52.dp),
+                )
+            }
             if (!useSideNavigation && !state.canNavigateBack && !state.isHome) {
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
