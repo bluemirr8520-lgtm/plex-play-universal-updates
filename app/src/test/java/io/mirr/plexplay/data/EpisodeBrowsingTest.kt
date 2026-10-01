@@ -122,7 +122,7 @@ class EpisodeBrowsingTest {
         assertEquals(listOf(season) to listOf(artist), resolve(artist, listOf(season)))
     }
 
-    @Test fun emptyFirstListRemainsEmptyForDetailsFallback() {
+    @Test fun emptyFirstListRemainsEmptyForInlineHeader() {
         assertEquals(emptyList<PlexItem>() to listOf(show), resolve(show, emptyList()))
     }
 }

@@ -18,6 +18,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -56,7 +57,6 @@ import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Home
-import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Movie
@@ -196,7 +196,8 @@ fun PlexPlayApp(viewModel: PlexViewModel) {
                         token = viewModel.token(),
                         onSelectSection = viewModel::selectSection,
                         onSelectItem = viewModel::selectItem,
-                        onShowItemDetails = viewModel::showItemDetails,
+                        onMarkWatched = viewModel::markWatched,
+                        onMarkUnwatched = viewModel::markUnwatched,
                         onPlay = viewModel::play,
                         onQueryChange = viewModel::setQuery,
                         onShowLibraryOrder = { viewModel.showLibraryOrder(true) },
@@ -317,7 +318,8 @@ private fun LibraryScreen(
     token: String,
     onSelectSection: (PlexSection) -> Unit,
     onSelectItem: (PlexItem) -> Unit,
-    onShowItemDetails: (PlexItem) -> Unit,
+    onMarkWatched: (PlexItem) -> Unit,
+    onMarkUnwatched: (PlexItem) -> Unit,
     onPlay: (PlexItem) -> Unit,
     onQueryChange: (String) -> Unit,
     onShowLibraryOrder: () -> Unit,
@@ -349,7 +351,7 @@ private fun LibraryScreen(
             runCatching { homeActionFocusRequester.requestFocus() }
         }
     }
-    LaunchedEffect(state.selectedSection?.key, state.browsingItem?.key) {
+    LaunchedEffect(state.selectedSection?.key, state.browsingItem?.ratingKey) {
         if (!state.isHome) {
             libraryGridState.scrollToItem(0)
         }
@@ -463,13 +465,6 @@ private fun LibraryScreen(
                     }
                 },
                 actions = {
-                    state.browsingItem?.let { parent ->
-                        OttTopActionButton(
-                            label = "정보",
-                            icon = Icons.Rounded.Info,
-                            onClick = { onShowItemDetails(parent) },
-                        )
-                    }
                     if (state.isHome) {
                         IconButton(
                             onClick = {
@@ -618,6 +613,7 @@ private fun LibraryScreen(
                 if (
                     libraryItems.isEmpty() &&
                     libraryContinueItems.isEmpty() &&
+                    state.browsingItem == null &&
                     !showLibraryContinue &&
                     !state.isLoading
                 ) {
@@ -635,6 +631,21 @@ private fun LibraryScreen(
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalArrangement = Arrangement.spacedBy(18.dp),
                     ) {
+                        state.browsingItem?.let { parent ->
+                            item(
+                                key = "browse_details",
+                                span = { GridItemSpan(maxLineSpan) },
+                            ) {
+                                BrowseDetailsHeader(
+                                    item = parent,
+                                    posterUrl = imageUrl(parent.thumb),
+                                    token = token,
+                                    isBusy = state.isLoading,
+                                    onMarkWatched = { onMarkWatched(parent) },
+                                    onMarkUnwatched = { onMarkUnwatched(parent) },
+                                )
+                            }
+                        }
                         if (showLibraryContinue) {
                             item(
                                 key = "library_continue",
@@ -670,7 +681,16 @@ private fun LibraryScreen(
                                         "검색 결과"
                                     },
                                     count = libraryItems.size,
-                                    sortedLabel = "가나다순",
+                                    sortedLabel = if (state.browsingItem != null) "서버 순서" else "가나다순",
+                                )
+                            }
+                        }
+                        if (libraryItems.isEmpty() && state.browsingItem != null && !state.isLoading) {
+                            item(key = "browse_empty", span = { GridItemSpan(maxLineSpan) }) {
+                                Text(
+                                    if (state.query.isBlank()) "표시할 에피소드가 없습니다." else "검색 결과가 없습니다.",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(vertical = 12.dp),
                                 )
                             }
                         }
@@ -689,6 +709,101 @@ private fun LibraryScreen(
                 }
             }
         }
+        }
+    }
+}
+
+/** Part of the same scrolling list, never a separate information dialog. */
+@Composable
+private fun BrowseDetailsHeader(
+    item: PlexItem,
+    posterUrl: String?,
+    token: String,
+    isBusy: Boolean,
+    onMarkWatched: () -> Unit,
+    onMarkUnwatched: () -> Unit,
+) {
+    var expanded by rememberSaveable(item.ratingKey) { mutableStateOf(false) }
+    var summaryOverflows by remember(item.ratingKey, item.summary) { mutableStateOf(false) }
+    val wide = LocalConfiguration.current.screenWidthDp >= 600
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            if (posterUrl != null) {
+                PlexImage(
+                    url = posterUrl,
+                    token = token,
+                    contentDescription = item.title,
+                    modifier = Modifier.width(if (wide) 104.dp else 76.dp)
+                        .aspectRatio(.68f).clip(RoundedCornerShape(8.dp)),
+                )
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = item.title,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = if (wide) 28.sp else 22.sp,
+                    lineHeight = if (wide) 32.sp else 27.sp,
+                )
+                Text(
+                    listOfNotNull(item.year?.toString(), item.subtitle?.takeIf { it.isNotBlank() }, typeLabel(item.type))
+                        .joinToString("  ·  "),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 13.sp,
+                )
+                if (item.isSeriesContainer && item.leafCount > 0) {
+                    Text(
+                        "전체 ${item.leafCount}화 · 시청 완료 ${item.viewedLeafCount.coerceIn(0, item.leafCount)}화",
+                        color = PlexGold,
+                        fontSize = 13.sp,
+                    )
+                }
+                WatchedBadge(watched = item.isSeriesContainer && item.isWatched)
+                if (item.genres.isNotEmpty()) {
+                    Text(item.genres.joinToString(" · ") { it.tag }, color = Color.White.copy(alpha = .72f), fontSize = 13.sp)
+                }
+            }
+        }
+        item.summary?.takeIf { it.isNotBlank() }?.let { summary ->
+            Text(
+                text = summary,
+                color = Color.White.copy(alpha = .82f),
+                lineHeight = 21.sp,
+                maxLines = if (expanded) Int.MAX_VALUE else 3,
+                overflow = TextOverflow.Ellipsis,
+                onTextLayout = { if (!expanded) summaryOverflows = it.hasVisualOverflow },
+            )
+            if (summaryOverflows || expanded) {
+                OttTopActionButton(
+                    label = if (expanded) "줄거리 접기" else "줄거리 펼치기",
+                    icon = if (expanded) Icons.Rounded.ArrowUpward else Icons.Rounded.ArrowDownward,
+                    onClick = { expanded = !expanded },
+                )
+            }
+        }
+        formatVideoDescription(item)?.let { MediaTypeLine(label = "비디오", value = it) }
+        formatAudioDescription(item)?.let { MediaTypeLine(label = "오디오", value = it) }
+        if (item.isSeriesContainer) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OttTopActionButton(
+                    label = "시청 완료",
+                    icon = Icons.Rounded.CheckCircle,
+                    onClick = onMarkWatched,
+                    enabled = !isBusy,
+                )
+                OttTopActionButton(
+                    label = "시청하지 않음",
+                    icon = Icons.Rounded.VisibilityOff,
+                    onClick = onMarkUnwatched,
+                    enabled = !isBusy,
+                )
+            }
         }
     }
 }
@@ -902,10 +1017,12 @@ private fun OttTopActionButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     selected: Boolean = false,
+    enabled: Boolean = true,
 ) {
     var focused by remember { mutableStateOf(false) }
     Button(
         onClick = onClick,
+        enabled = enabled,
         modifier = modifier
             .height(42.dp)
             .scale(if (focused) 1.08f else 1f)

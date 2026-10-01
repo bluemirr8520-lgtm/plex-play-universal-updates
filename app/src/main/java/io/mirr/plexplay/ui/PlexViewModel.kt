@@ -105,6 +105,7 @@ class PlexViewModel(
     private var loadingJob: Job? = null
     private var homeSearchJob: Job? = null
     private var relatedJob: Job? = null
+    private var browseDetailsJob: Job? = null
     private var playingItem: PlexItem? = null
     private var playbackQueue: List<PlexItem> = emptyList()
     private var playbackQueueIndex: Int = -1
@@ -119,6 +120,7 @@ class PlexViewModel(
         username: String,
         password: String,
     ) {
+        browseDetailsJob?.cancel()
         loadingJob?.cancel()
         loadingJob = viewModelScope.launch {
             _state.update { it.copy(isLoading = true, error = null) }
@@ -146,6 +148,7 @@ class PlexViewModel(
     }
 
     fun refresh() {
+        browseDetailsJob?.cancel()
         loadingJob?.cancel()
         loadingJob = viewModelScope.launch {
             _state.update { it.copy(isLoading = true, error = null) }
@@ -240,6 +243,7 @@ class PlexViewModel(
         }
 
     fun selectHome() {
+        browseDetailsJob?.cancel()
         loadingJob?.cancel()
         loadingJob = viewModelScope.launch {
             _state.update { it.copy(isLoading = true, error = null) }
@@ -257,6 +261,7 @@ class PlexViewModel(
     }
 
     fun selectSection(section: PlexSection) {
+        browseDetailsJob?.cancel()
         loadingJob?.cancel()
         loadingJob = viewModelScope.launch {
             _state.update { it.copy(isLoading = true, error = null, selectedItem = null) }
@@ -305,7 +310,7 @@ class PlexViewModel(
         }
     }
 
-    fun showItemDetails(item: PlexItem?) {
+    private fun showItemDetails(item: PlexItem?) {
         relatedJob?.cancel()
         if (item == null) {
             _state.update {
@@ -384,9 +389,10 @@ class PlexViewModel(
     }
 
     fun browse(item: PlexItem) {
+        browseDetailsJob?.cancel()
         loadingJob?.cancel()
         showItemDetails(null)
-        // The information sheet for this list must not add the same page to history.
+        // Returning to the current list must not add the same page to history.
         if (_state.value.browsingItem?.let { it.ratingKey == item.ratingKey && it.type == item.type } == true) {
             _state.update { it.copy(isLoading = false) }
             return
@@ -397,7 +403,7 @@ class PlexViewModel(
                 val current = _state.value
                 val children = repository.episodeBrowseItems(item)
                 currentCoroutineContext().ensureActive()
-                if (children.isEmpty()) {
+                if (children.isEmpty() && !item.opensEpisodeList) {
                     showItemDetails(item)
                     return@launch
                 }
@@ -423,6 +429,7 @@ class PlexViewModel(
                         canNavigateBack = true,
                     )
                 }
+                loadBrowseDetails(item)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -431,6 +438,25 @@ class PlexViewModel(
                 if (currentCoroutineContext()[Job]?.isActive == true) {
                     _state.update { it.copy(isLoading = false) }
                 }
+            }
+        }
+    }
+
+    private fun loadBrowseDetails(item: PlexItem) {
+        browseDetailsJob?.cancel()
+        val connection = repository.connection()
+        browseDetailsJob = viewModelScope.launch {
+            val detailed = try {
+                repository.itemDetails(item)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // Keep the list usable with the poster metadata already available.
+                return@launch
+            }
+            currentCoroutineContext().ensureActive()
+            if (repository.connection() == connection) {
+                _state.update { it.withBrowseDetails(item, detailed, connection) }
             }
         }
     }
@@ -457,6 +483,7 @@ class PlexViewModel(
             return true
         }
         loadingJob?.cancel()
+        browseDetailsJob?.cancel()
         _state.update { it.copy(isLoading = false) }
         val previous = history.removeLastOrNull()
         if (previous == null) {
@@ -490,6 +517,7 @@ class PlexViewModel(
                 canNavigateBack = history.isNotEmpty(),
             )
         }
+        _state.value.browsingItem?.let(::loadBrowseDetails)
         return true
     }
 
@@ -798,6 +826,7 @@ class PlexViewModel(
     ) {
         if (_state.value.isLoading) return
         relatedJob?.cancel()
+        browseDetailsJob?.cancel()
         viewModelScope.launch {
             _state.update { it.copy(isLoading = true, isRelatedLoading = false, error = null) }
             try {
@@ -809,7 +838,7 @@ class PlexViewModel(
                     } else {
                         candidate
                     }
-                // A series action is now reached from the list's Info button;
+                // A series action is reached from the inline list header;
                 // keep its poster current when Back restores the parent list.
                 val updatedHistory = history.map { entry ->
                     entry.copy(items = entry.items.map(::update), browsingItem = entry.browsingItem?.let(::update))
@@ -854,6 +883,24 @@ class PlexViewModel(
                     )
                 }
                 val currentState = _state.value
+                val currentBrowseItem = currentState.browsingItem
+                if (currentBrowseItem != null) {
+                    if (currentBrowseItem.ratingKey == item.ratingKey && result.item != null) {
+                        val connection = repository.connection()
+                        val refreshed = try {
+                            repository.episodeBrowseItems(currentBrowseItem)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Exception) {
+                            null
+                        }
+                        if (refreshed != null && repository.connection() == connection) {
+                            _state.update { it.withBrowseItems(currentBrowseItem, refreshed, connection) }
+                        }
+                    } else {
+                        loadBrowseDetails(currentBrowseItem)
+                    }
+                }
                 val section = currentState.selectedSection
                     ?: currentState.sections.firstOrNull {
                         it.key == item.librarySectionId
@@ -983,6 +1030,7 @@ class PlexViewModel(
     }
 
     fun logout() {
+        browseDetailsJob?.cancel()
         playingItem = null
         repository.logout()
         history.clear()

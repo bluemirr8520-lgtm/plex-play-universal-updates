@@ -11,10 +11,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  UNIVERSAL_TAG: v1.0.33
-  UNIVERSAL_VERSION: 1.0.33
-  UNIVERSAL_VERSION_CODE: "34"
-  EXPECTED_UNIT_TESTS: "315"
+  UNIVERSAL_TAG: v1.0.34
+  UNIVERSAL_VERSION: 1.0.34
+  UNIVERSAL_VERSION_CODE: "35"
+  EXPECTED_UNIT_TESTS: "325"
   # The build dependency was preserved on the retained release during cleanup.
   LIBVLC_SOURCE_TAG: v1.0.31
   EXPECTED_CERT_SHA256: 74c178f3841343954e4a6c74223c4ef06df5cef270485c557d4f915f389845e2
