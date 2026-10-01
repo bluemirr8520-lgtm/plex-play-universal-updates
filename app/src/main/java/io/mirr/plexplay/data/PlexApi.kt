@@ -180,7 +180,6 @@ class PlexApi(
         val plexType = when (mediaType) {
             "movie" -> "1"
             "show" -> "2"
-            "episode" -> "4"
             "clip" -> "12"
             else -> throw PlexException("이 영상 유형에는 컬렉션 태그를 적용할 수 없습니다.")
         }

@@ -519,7 +519,6 @@ class PlexViewModel(
             completingPlaybackId == source.playbackId
         ) return
         completingPlaybackId = source.playbackId
-        val completedItem = playingItem
         val currentState = _state.value
         val returnToHome = currentState.isHome
         val selectedSection = currentState.selectedSection
@@ -559,7 +558,7 @@ class PlexViewModel(
                     repository.timeline(source, "stopped", positionMs)
                 }
                 if (!repository.setWatched(source, watched = true)) return@launch
-                updateCompletedPlaybackCollection(source, completedItem, sections)
+                updateCompletedPlaybackCollection(source)
                 if (nextItem != null) {
                     // Closing, signing out, or selecting another video while the
                     // watched update is pending must cancel this automatic next.
@@ -611,15 +610,14 @@ class PlexViewModel(
 
     private fun updateCompletedPlaybackCollection(
         source: PlaybackSource,
-        item: PlexItem?,
-        sections: List<PlexSection>,
     ) {
         if (!pendingCollectionUpdates.add(source.playbackId)) return
         viewModelScope.launch {
             try {
-                val tag = repository.updateCompletedPlaybackCollection(source, item, sections)
-                if (tag != null) {
-                    _state.update { it.copy(notice = "재생 완료 영상의 컬렉션을 $tag 하나로 변경했습니다.") }
+                val change = repository.updateCompletedPlaybackCollection(source)
+                if (change != null) {
+                    val target = if (change.item.type == "show") "시리즈 전체 시청이 완료되어 시리즈" else "재생 완료 영상의"
+                    _state.update { it.copy(notice = "$target 컬렉션을 ${change.tag} 하나로 변경했습니다.") }
                 }
             } catch (error: CancellationException) {
                 throw error

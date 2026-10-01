@@ -18,6 +18,32 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertNotNull
 
 class PlexApiCollectionTest {
+    @Test fun completedEpisodeWritesOnlyTheParentShowOnTheWire() = runBlocking {
+        val leaves = """<MediaContainer librarySectionID="7">
+            <Video ratingKey="50" key="/library/metadata/50" type="episode" grandparentRatingKey="42" viewCount="1"><Media><Part file="/TV/50.mkv" key="/part/50"/></Media></Video>
+            <Video ratingKey="51" key="/library/metadata/51" type="episode" grandparentRatingKey="42" viewCount="1"><Media><Part file="/TV/51.mkv" key="/part/51"/></Media></Video>
+            </MediaContainer>"""
+        val verified = """<MediaContainer librarySectionID="7"><Directory ratingKey="42" key="/library/metadata/42" type="show" leafCount="2" viewedLeafCount="2"><Collection tag="KILL"/></Directory></MediaContainer>"""
+        TestServer(script = listOf(200 to seriesMetadata(2), 200 to leaves, 200 to "<MediaContainer/>",
+            200 to "", 200 to verified)).use { server ->
+            val updater = CompletedCollectionUpdater(
+                metadata = { key -> server.api.metadata(key).singleOrNull() },
+                sections = { listOf(PlexSection("7", "TV", "show")) },
+                episodes = { key -> server.api.seriesEpisodes(key) },
+                replace = { item, section, tag -> server.api.replaceCollectionTag(section.key, item.ratingKey, item.type, tag, item.collections) },
+                isCurrent = { true }, waitForReadback = {},
+            )
+            val episode = PlexItem("50", "/library/metadata/50", "episode", "Episode", librarySectionId = "7", grandparentRatingKey = "42", viewCount = 1)
+            assertEquals("42", updater.update(episode, WatchedCollectionSettings())!!.item.ratingKey)
+            val writes = server.requests.filter { it.method == "PUT" }
+            assertEquals(1, writes.size)
+            assertEquals("42", writes.single().query["id"])
+            assertEquals("2", writes.single().query["type"])
+            assertTrue(server.requests.none { it.path == "/:/scrobble" || it.query["id"] == "50" || it.query["type"] == "4" })
+            assertEquals("/library/metadata/42", server.requests.last().path)
+        }
+    }
+
     @Test fun userDefinedCollectionNameIsEncodedAndVerifiedWithoutHardcodedTags() = runBlocking {
         val name = "시청 완료, A+B & C"
         val xml = metadata("시청 완료, A+B &amp; C")
@@ -137,7 +163,7 @@ class PlexApiCollectionTest {
 
     @Test
     fun supportsPlayableVideoAndSeriesTypes() = runBlocking {
-        for ((type, number) in listOf("movie" to "1", "show" to "2", "episode" to "4", "clip" to "12")) {
+        for ((type, number) in listOf("movie" to "1", "show" to "2", "clip" to "12")) {
             TestServer(metadata = metadata("123", type = type)).use { server ->
                 server.api.replaceCollectionTag("7", "42", type, "123", emptyList())
                 assertEquals(number, server.requests.first().query["type"])
@@ -148,7 +174,7 @@ class PlexApiCollectionTest {
     @Test
     fun rejectsUnknownTypeAndUnsafeIdentifiersBeforeConnecting() = runBlocking {
         TestServer(metadata = metadata("KILL")).use { server ->
-            for (type in listOf("season", "track", "video", "unknown", "")) {
+            for (type in listOf("episode", "season", "track", "video", "unknown", "")) {
                 expectPlexFailure { server.api.replaceCollectionTag("7", "42", type, "KILL", emptyList()) }
             }
             expectPlexFailure { server.api.replaceCollectionTag("7/all", "42", "movie", "KILL", emptyList()) }

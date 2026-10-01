@@ -6,12 +6,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.net.URLEncoder
 import java.util.UUID
 
 class PlexRepository(
     private val store: ConnectionStore,
 ) {
+    private val collectionUpdateMutex = Mutex()
+
     fun connection(): PlexConnection = store.load()
 
     fun saveConnection(connection: PlexConnection) = store.save(connection)
@@ -186,71 +190,55 @@ class PlexRepository(
         val collectionSettings = store.watchedCollectionSettings()
         val api = api(connection)
         var saved: PlexItem? = null
+        var collectionChange: CompletedCollectionChange? = null
         val notice = saveWatchedWithCollection(
             collectionUpdatesAllowed = connection.mayUpdateCollections,
             saveWatched = { saved = api.setWatchedAndVerify(item, true) },
             updateCollection = {
                 val resolved = checkNotNull(saved)
-                val section = api.sections().firstOrNull { it.key == resolved.librarySectionId }
-                    ?: throw PlexException("영상의 라이브러리를 확인하지 못했습니다.")
-                if (resolved.type != "show" && !managesWatchedCollections(section.title, resolved.type)) {
-                    return@saveWatchedWithCollection null
+                val change = collectionUpdateMutex.withLock {
+                    collectionUpdater(api, connection).update(resolved, collectionSettings)
                 }
-                val tag = if (resolved.type == "show") {
-                    seriesWatchedCollectionTag(section.title, resolved, api.seriesEpisodes(resolved.ratingKey), collectionSettings)
-                } else {
-                    manualWatchedCollectionTag(section.title, resolved.type, resolved.mediaFilePaths, collectionSettings)
+                collectionChange = change
+                if (change?.item?.ratingKey == resolved.ratingKey) {
+                    saved = change.item
                 }
-                    ?: throw PlexException("파일 경로가 불명확하거나 여러 파일 버전의 규칙이 달라 컬렉션을 변경하지 않았습니다.")
-                if (store.load() != connection) throw PlexException("서버 연결이 변경되어 컬렉션 변경을 중지했습니다.")
-                api.replaceCollectionTag(
-                    sectionId = section.key,
-                    ratingKey = resolved.ratingKey,
-                    mediaType = if (resolved.type == "video" && section.type == "movie") "movie" else resolved.type,
-                    tag = tag,
-                    existingCollections = resolved.collections,
-                )
-                saved = resolved.copy(collections = listOf(tag))
-                tag
+                change?.tag
             },
         )
-        return WatchedActionResult(checkNotNull(saved), notice)
+        val finalNotice = collectionChange?.takeIf { it.item.type == "show" }?.let {
+            "시리즈 전체 시청을 완료해 시리즈 컬렉션을 ${it.tag} 하나로 변경했습니다."
+        } ?: notice
+        return WatchedActionResult(checkNotNull(saved), finalNotice)
     }
 
     /** Real playback completion uses the played Part; manual completion uses fresh metadata. */
-    suspend fun updateCompletedPlaybackCollection(
+    internal suspend fun updateCompletedPlaybackCollection(
         source: PlaybackSource,
-        knownItem: PlexItem?,
-        knownSections: List<PlexSection>,
-    ): String? {
+    ): CompletedCollectionChange? {
         val connection = validatedPlaybackConnection(source, store.load()) ?: return null
         if (!connection.mayUpdateCollections) return null
         val collectionSettings = store.watchedCollectionSettings()
-        val knownSection = knownSections.firstOrNull { it.key == knownItem?.librarySectionId }
-        if (knownItem != null && knownSection != null &&
-            !managesWatchedCollections(knownSection.title, knownItem.type)
-        ) return null
-
         val api = api(connection)
-        val item = api.metadata(source.ratingKey).firstOrNull { it.ratingKey == source.ratingKey }
-            ?: throw PlexException("재생 완료 영상의 컬렉션 정보를 확인하지 못했습니다.")
-        val section = api.sections().firstOrNull { it.key == item.librarySectionId }
-            ?: throw PlexException("재생 완료 영상의 라이브러리를 확인하지 못했습니다.")
-        if (!managesWatchedCollections(section.title, item.type)) return null
-        val tag = watchedCollectionTag(section.title, item.type, source.filePath, collectionSettings)
-            ?: throw PlexException("실제 재생 파일 경로를 확인할 수 없어 컬렉션을 변경하지 않았습니다.")
-        val mediaType = if (item.type == "video" && section.type == "movie") "movie" else item.type
-        // A user may sign out or switch servers while the metadata request is pending.
-        if (store.load() != connection) return null
-        api.replaceCollectionTag(
-            sectionId = section.key,
-            ratingKey = source.ratingKey,
-            mediaType = mediaType,
-            tag = tag,
-            existingCollections = item.collections,
-        )
-        return tag
+        return collectionUpdateMutex.withLock {
+            val item = api.metadata(source.ratingKey).singleOrNull { it.ratingKey == source.ratingKey }
+                ?: throw PlexException("재생 완료 영상의 컬렉션 정보를 확인하지 못했습니다.")
+            collectionUpdater(api, connection).update(item, collectionSettings,
+                playedFilePath = source.filePath, usePlayedFilePath = true)
+        }
     }
+
+    private fun collectionUpdater(api: PlexApi, connection: PlexConnection) = CompletedCollectionUpdater(
+        metadata = { key -> api.metadata(key).singleOrNull { it.ratingKey == key } },
+        sections = { api.sections() },
+        episodes = { api.seriesEpisodes(it) },
+        isCurrent = { store.load() == connection },
+        replace = { item, section, tag ->
+            api.replaceCollectionTag(section.key, item.ratingKey,
+                if (item.type == "video" && section.type == "movie") "movie" else item.type,
+                tag, item.collections)
+        },
+    )
 
     suspend fun removeFromContinueWatching(item: PlexItem) =
         api().removeFromContinueWatching(item.ratingKey)

@@ -52,7 +52,7 @@ internal fun CollectionSettingsDialog(
             ) {
                 Text("시청 완료 컬렉션", color = Color.White, fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.titleLarge)
-                Text("이 기기에 저장하며 자동·수동 시청 완료와 시리즈 완료에 공통 적용합니다.", color = Color.LightGray)
+                Text("영화는 자동·수동 완료 시, 시리즈는 수동 완료 또는 전체 에피소드 시청 완료 시 적용합니다. 개별 에피소드·시즌에는 컬렉션을 붙이지 않습니다.", color = Color.LightGray)
                 val colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = Color.White, unfocusedTextColor = Color.White,
                     focusedBorderColor = PlexGold, focusedLabelColor = PlexGold,

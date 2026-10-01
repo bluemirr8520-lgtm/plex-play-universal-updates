@@ -32,7 +32,9 @@ private val PlexApiFolders = listOf(
 )
 
 // The repository resolves the item's actual registered section before calling
-// this policy. New or renamed libraries must not require an app allowlist update.
+// this path policy. Episode paths are used to classify their parent show only;
+// they are not permission to write episode collections. The API rejects that type.
+// New or renamed libraries must not require an app allowlist update.
 internal fun managesWatchedCollections(libraryTitle: String?, mediaType: String): Boolean =
     !libraryTitle.isNullOrBlank() && mediaType in WatchedCollectionVideoTypes
 
