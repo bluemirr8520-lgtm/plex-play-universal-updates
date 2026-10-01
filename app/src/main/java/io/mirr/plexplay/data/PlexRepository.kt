@@ -249,6 +249,16 @@ class PlexRepository(
 
     suspend fun hasChildren(item: PlexItem): Boolean = children(item).isNotEmpty()
 
+    suspend fun episodeBrowseItems(item: PlexItem): List<PlexItem> {
+        val connection = store.load()
+        val api = api(connection)
+        val items = episodeBrowseItems(item) { folder -> api.children(plexChildrenPath(folder)) }
+        if (store.load() != connection) {
+            throw PlexException("서버 연결이 변경되어 이전 목록 요청을 중지했습니다.")
+        }
+        return items
+    }
+
     suspend fun seasonSiblings(item: PlexItem): List<PlexItem> {
         val resolved = api().metadata(item.ratingKey).firstOrNull() ?: item
         if (item.type != "episode" && resolved.type != "episode") return emptyList()

@@ -56,6 +56,7 @@ import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Movie
@@ -195,6 +196,7 @@ fun PlexPlayApp(viewModel: PlexViewModel) {
                         token = viewModel.token(),
                         onSelectSection = viewModel::selectSection,
                         onSelectItem = viewModel::selectItem,
+                        onShowItemDetails = viewModel::showItemDetails,
                         onPlay = viewModel::play,
                         onQueryChange = viewModel::setQuery,
                         onShowLibraryOrder = { viewModel.showLibraryOrder(true) },
@@ -315,6 +317,7 @@ private fun LibraryScreen(
     token: String,
     onSelectSection: (PlexSection) -> Unit,
     onSelectItem: (PlexItem) -> Unit,
+    onShowItemDetails: (PlexItem) -> Unit,
     onPlay: (PlexItem) -> Unit,
     onQueryChange: (String) -> Unit,
     onShowLibraryOrder: () -> Unit,
@@ -346,7 +349,7 @@ private fun LibraryScreen(
             runCatching { homeActionFocusRequester.requestFocus() }
         }
     }
-    LaunchedEffect(state.selectedSection?.key) {
+    LaunchedEffect(state.selectedSection?.key, state.browsingItem?.key) {
         if (!state.isHome) {
             libraryGridState.scrollToItem(0)
         }
@@ -460,6 +463,13 @@ private fun LibraryScreen(
                     }
                 },
                 actions = {
+                    state.browsingItem?.let { parent ->
+                        OttTopActionButton(
+                            label = "정보",
+                            icon = Icons.Rounded.Info,
+                            onClick = { onShowItemDetails(parent) },
+                        )
+                    }
                     if (state.isHome) {
                         IconButton(
                             onClick = {

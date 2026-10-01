@@ -17,11 +17,14 @@ import io.mirr.plexplay.data.matchesPlaybackCompletion
 import io.mirr.plexplay.data.playbackFolderKey
 import io.mirr.plexplay.data.sameFolderPlaybackQueue
 import io.mirr.plexplay.data.validatedPlaybackNeighbor
+import io.mirr.plexplay.data.opensEpisodeList
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -49,6 +52,7 @@ data class PlexUiState(
     val isHomeSearchLoading: Boolean = false,
     val isHome: Boolean = true,
     val selectedSection: PlexSection? = null,
+    val browsingItem: PlexItem? = null,
     val title: String = "홈",
     val items: List<PlexItem> = emptyList(),
     val query: String = "",
@@ -224,6 +228,7 @@ class PlexViewModel(
                     isHomeSearchLoading = false,
                     isHome = true,
                     selectedSection = null,
+                    browsingItem = null,
                     title = "홈",
                     items = emptyList(),
                     query = "",
@@ -278,6 +283,7 @@ class PlexViewModel(
         _state.update {
             it.copy(
                 selectedSection = section,
+                browsingItem = null,
                 isHome = false,
                 title = section.title,
                 items = items,
@@ -292,6 +298,14 @@ class PlexViewModel(
     }
 
     fun selectItem(item: PlexItem?) {
+        if (item?.opensEpisodeList == true) {
+            browse(item)
+        } else {
+            showItemDetails(item)
+        }
+    }
+
+    fun showItemDetails(item: PlexItem?) {
         relatedJob?.cancel()
         if (item == null) {
             _state.update {
@@ -371,17 +385,30 @@ class PlexViewModel(
 
     fun browse(item: PlexItem) {
         loadingJob?.cancel()
+        showItemDetails(null)
+        // The information sheet for this list must not add the same page to history.
+        if (_state.value.browsingItem?.let { it.ratingKey == item.ratingKey && it.type == item.type } == true) {
+            _state.update { it.copy(isLoading = false) }
+            return
+        }
         loadingJob = viewModelScope.launch {
             _state.update { it.copy(isLoading = true, error = null) }
             try {
                 val current = _state.value
-                val children = repository.children(item)
+                val children = repository.episodeBrowseItems(item)
+                currentCoroutineContext().ensureActive()
+                if (children.isEmpty()) {
+                    showItemDetails(item)
+                    return@launch
+                }
                 history.addLast(
                     HistoryEntry(
                         title = current.title,
                         items = current.items,
                         isHome = current.isHome,
                         selectedSection = current.selectedSection,
+                        browsingItem = current.browsingItem,
+                        query = current.query,
                     ),
                 )
                 _state.update {
@@ -389,15 +416,21 @@ class PlexViewModel(
                         title = item.title,
                         isHome = false,
                         items = children,
+                        browsingItem = item,
                         query = "",
                         selectedItem = null,
+                        selectedItemCanBrowse = false,
                         canNavigateBack = true,
                     )
                 }
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 showError(error)
             } finally {
-                _state.update { it.copy(isLoading = false) }
+                if (currentCoroutineContext()[Job]?.isActive == true) {
+                    _state.update { it.copy(isLoading = false) }
+                }
             }
         }
     }
@@ -423,6 +456,8 @@ class PlexViewModel(
             selectItem(null)
             return true
         }
+        loadingJob?.cancel()
+        _state.update { it.copy(isLoading = false) }
         val previous = history.removeLastOrNull()
         if (previous == null) {
             if (!_state.value.isHome) {
@@ -431,6 +466,7 @@ class PlexViewModel(
                     it.copy(
                         isHome = true,
                         selectedSection = null,
+                        browsingItem = null,
                         title = "홈",
                         items = emptyList(),
                         query = "",
@@ -449,7 +485,8 @@ class PlexViewModel(
                 items = previous.items,
                 isHome = previous.isHome,
                 selectedSection = previous.selectedSection,
-                query = "",
+                browsingItem = previous.browsingItem,
+                query = previous.query,
                 canNavigateBack = history.isNotEmpty(),
             )
         }
@@ -772,9 +809,17 @@ class PlexViewModel(
                     } else {
                         candidate
                     }
+                // A series action is now reached from the list's Info button;
+                // keep its poster current when Back restores the parent list.
+                val updatedHistory = history.map { entry ->
+                    entry.copy(items = entry.items.map(::update), browsingItem = entry.browsingItem?.let(::update))
+                }
+                history.clear()
+                history.addAll(updatedHistory)
                 _state.update { current ->
                     current.copy(
                         items = current.items.map(::update),
+                        browsingItem = current.browsingItem?.let(::update),
                         homeSearchResults = current.homeSearchResults.map(::update),
                         homeRows = current.homeRows.map { row ->
                             row.copy(items = row.items.map(::update))
@@ -1149,6 +1194,8 @@ class PlexViewModel(
         val items: List<PlexItem>,
         val isHome: Boolean,
         val selectedSection: PlexSection?,
+        val browsingItem: PlexItem?,
+        val query: String,
     )
 }
 
