@@ -18,6 +18,7 @@ import android.os.Looper
 import android.provider.OpenableColumns
 import android.util.Log
 import android.view.KeyEvent as AndroidKeyEvent
+import android.view.SurfaceView
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
@@ -157,6 +158,19 @@ private fun readVlcAudioTrackFormat(player: MediaPlayer): VlcAudioTrackFormat? =
     } finally {
         media.release()
     }
+}.getOrNull()
+
+private fun readVlcVideoFrameRate(player: MediaPlayer): Double? = runCatching {
+    val selectedId = player.videoTrack
+    if (selectedId < 0) return@runCatching null
+    val media = player.media ?: return@runCatching null
+    try {
+        val track = (0 until media.trackCount).asSequence()
+            .mapNotNull { media.getTrack(it) as? IMedia.VideoTrack }
+            .firstOrNull { it.id == selectedId } ?: return@runCatching null
+        if (track.frameRateNum <= 0 || track.frameRateDen <= 0) return@runCatching null
+        track.frameRateNum.toDouble() / track.frameRateDen
+    } finally { media.release() }
 }.getOrNull()
 
 private enum class VlcSettingsPage(
@@ -420,6 +434,8 @@ fun VlcPlayerScreen(
         mutableStateOf(VlcDecoderMode.fromStorage(preferences.getString("vlc_decoder_mode", null)))
     }
     var softwareFallbackUsed by remember(source.playbackId, decoderMode) { mutableStateOf(false) }
+    var detectedVideoFrameRate by remember(source.playbackId) { mutableStateOf(source.videoFrameRate) }
+    var frameRateController by remember { mutableStateOf<VideoFrameRateController?>(null) }
     var playbackHasProgressed by remember(source.playbackId, decoderMode) { mutableStateOf(false) }
     val lowMemoryDevice = remember(context) {
         runCatching {
@@ -730,6 +746,7 @@ fun VlcPlayerScreen(
     }
 
     fun updateTrackLists(player: MediaPlayer) {
+        readVlcVideoFrameRate(player)?.let { detectedVideoFrameRate = it }
         audioTrackFormat = readVlcAudioTrackFormat(player)
         audioTracks = player.audioTracks.orEmpty().map { VlcTrack(it.id, it.name) }
         subtitleTracks = player.spuTracks.orEmpty().map { VlcTrack(it.id, it.name) }
@@ -1231,6 +1248,20 @@ fun VlcPlayerScreen(
                 runCatching { libVlc.release() }
             }
         }
+    }
+
+    DisposableEffect(videoLayout, rendererRevision) {
+        // attachViews above inflates the video stub. Do not target VLC's subtitle surface.
+        val surface = videoLayout?.findViewById<SurfaceView>(org.videolan.R.id.surface_video)
+        val controller = surface?.let(::VideoFrameRateController)
+        frameRateController = controller
+        onDispose {
+            controller?.dispose()
+            if (frameRateController === controller) frameRateController = null
+        }
+    }
+    LaunchedEffect(frameRateController, detectedVideoFrameRate, playbackSpeed, isPlaying) {
+        frameRateController?.update(detectedVideoFrameRate, playbackSpeed, isPlaying)
     }
 
     LaunchedEffect(source.ratingKey, selectedAppTextSubtitle) {

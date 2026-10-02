@@ -2,4 +2,5 @@
 <resources>
     <item name="playback_scale_update_cache" type="id" />
     <item name="playback_color_update_cache" type="id" />
+    <item name="subtitle_render_update_cache" type="id" />
 </resources>

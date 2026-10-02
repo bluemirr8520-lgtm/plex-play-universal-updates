@@ -33,7 +33,7 @@ internal fun vlcBufferProfile(
     val demanding = isVlcUhdVideo(width, height) ||
         (frameRate != null && frameRate.isFinite() && frameRate >= 50.0)
     val requestedNetworkMs = when (mode) {
-        VlcOptimizationMode.AUTO -> if (demanding) 5_000 else 1_500
+        VlcOptimizationMode.AUTO -> if (demanding) 6_000 else 3_000
         VlcOptimizationMode.STABILITY -> if (demanding) 8_000 else 3_000
         VlcOptimizationMode.BALANCED -> if (demanding) 3_000 else 1_500
         VlcOptimizationMode.PERFORMANCE -> if (demanding) 1_500 else 800

@@ -3963,6 +3963,20 @@ private fun applySubtitleStyle(
     }
 }
 
+private data class SubtitleRenderState(
+    val text: String,
+    val typeface: Typeface,
+    val appearance: SubtitleAppearance,
+    val density: Float,
+)
+
+private data class HorizontalSubtitleLayoutKey(
+    val text: String,
+    val typeface: Typeface,
+    val textSizePx: Float,
+    val maxTextWidth: Float,
+)
+
 @Composable
 internal fun HorizontalSubtitleOverlay(
     text: String,
@@ -3979,28 +3993,28 @@ internal fun HorizontalSubtitleOverlay(
         },
         update = { view ->
             val density = view.resources.displayMetrics.density
-            view.subtitleText = text
-            view.subtitleTypeface = typeface
-            view.subtitleTextFraction =
-                .0533f * appearance.sizePercent.coerceIn(50, 200) / 100f
-            view.subtitleFillColor = appearance.foregroundColor
-            view.subtitleBackgroundColor = appearance.backgroundColor
-            view.subtitleEdgeType = appearance.edgeType
-            view.subtitleEdgeColor = appearance.edgeColor
-            view.outlineStrokeWidth = 3.5f * density
-            view.horizontalOffsetPercent =
-                appearance.horizontalOffsetPercent
-            view.verticalOffsetPercent =
-                appearance.verticalOffsetPercent
-            view.lineHeightMultiplier = SubtitleLineSpacingMultiplier
-            view.setPadding(
-                (24 * density).roundToInt(),
-                (24 * density).roundToInt(),
-                (24 * density).roundToInt(),
-                (72 * density).roundToInt(),
-            )
-            view.requestLayout()
-            view.invalidate()
+            view.updatePlaybackView(R.id.subtitle_render_update_cache, view,
+                SubtitleRenderState(text, typeface, appearance, density)) {
+                view.subtitleText = text
+                view.subtitleTypeface = typeface
+                view.subtitleTextFraction =
+                    .0533f * appearance.sizePercent.coerceIn(50, 200) / 100f
+                view.subtitleFillColor = appearance.foregroundColor
+                view.subtitleBackgroundColor = appearance.backgroundColor
+                view.subtitleEdgeType = appearance.edgeType
+                view.subtitleEdgeColor = appearance.edgeColor
+                view.outlineStrokeWidth = 3.5f * density
+                view.horizontalOffsetPercent = appearance.horizontalOffsetPercent
+                view.verticalOffsetPercent = appearance.verticalOffsetPercent
+                view.lineHeightMultiplier = SubtitleLineSpacingMultiplier
+                view.setPadding(
+                    (24 * density).roundToInt(),
+                    (24 * density).roundToInt(),
+                    (24 * density).roundToInt(),
+                    (72 * density).roundToInt(),
+                )
+                view.invalidate()
+            }
         },
         modifier = modifier,
     )
@@ -4022,30 +4036,30 @@ internal fun VerticalSubtitleOverlay(
         },
         update = { view ->
             val density = view.resources.displayMetrics.density
-            view.subtitleText = text
-            view.subtitleTypeface = typeface
-            view.subtitleTextSizePx =
-                30f * density * appearance.sizePercent.coerceIn(50, 200) / 100f
-            view.subtitleFillColor = appearance.foregroundColor
-            view.subtitleEdgeType = appearance.edgeType
-            view.subtitleEdgeColor = appearance.edgeColor
-            view.outlineStrokeWidth = 3.5f * density
-            view.columnLineSpacingMultiplier = SubtitleLineSpacingMultiplier
-            view.glyphAdvancePx = 28.5f * density *
-                appearance.sizePercent.coerceIn(50, 200) / 100f
-            view.horizontalOffsetPercent =
-                appearance.horizontalOffsetPercent
-            view.verticalOffsetPercent =
-                appearance.verticalOffsetPercent
-            view.subtitleBackgroundColor = appearance.backgroundColor
-            view.setPadding(
-                (34 * density).roundToInt(),
-                (18 * density).roundToInt(),
-                (80 * density).roundToInt(),
-                (18 * density).roundToInt(),
-            )
-            view.requestLayout()
-            view.invalidate()
+            view.updatePlaybackView(R.id.subtitle_render_update_cache, view,
+                SubtitleRenderState(text, typeface, appearance, density)) {
+                view.subtitleText = text
+                view.subtitleTypeface = typeface
+                view.subtitleTextSizePx =
+                    30f * density * appearance.sizePercent.coerceIn(50, 200) / 100f
+                view.subtitleFillColor = appearance.foregroundColor
+                view.subtitleEdgeType = appearance.edgeType
+                view.subtitleEdgeColor = appearance.edgeColor
+                view.outlineStrokeWidth = 3.5f * density
+                view.columnLineSpacingMultiplier = SubtitleLineSpacingMultiplier
+                view.glyphAdvancePx = 28.5f * density *
+                    appearance.sizePercent.coerceIn(50, 200) / 100f
+                view.horizontalOffsetPercent = appearance.horizontalOffsetPercent
+                view.verticalOffsetPercent = appearance.verticalOffsetPercent
+                view.subtitleBackgroundColor = appearance.backgroundColor
+                view.setPadding(
+                    (34 * density).roundToInt(),
+                    (18 * density).roundToInt(),
+                    (80 * density).roundToInt(),
+                    (18 * density).roundToInt(),
+                )
+                view.invalidate()
+            }
         },
         modifier = modifier,
     )
@@ -4062,11 +4076,13 @@ private class HorizontalSubtitleView(context: Context) : View(context) {
         }
     var subtitleTypeface: Typeface = Typeface.DEFAULT
         set(value) {
+            if (field == value) return
             field = value
             invalidate()
         }
     var subtitleTextFraction: Float = .0533f
         set(value) {
+            if (field == value) return
             field = value
             requestLayout()
             invalidate()
@@ -4081,6 +4097,8 @@ private class HorizontalSubtitleView(context: Context) : View(context) {
     var lineHeightMultiplier: Float = SubtitleLineSpacingMultiplier
 
     private var paragraphs: List<String> = emptyList()
+    private var wrappedLayoutKey: HorizontalSubtitleLayoutKey? = null
+    private var wrappedLines: List<String> = emptyList()
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val edgePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val backgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -4102,8 +4120,12 @@ private class HorizontalSubtitleView(context: Context) : View(context) {
                     paddingRight -
                     horizontalPadding * 2f
                 ).coerceAtLeast(1f)
-        val lines = paragraphs
-            .flatMap { it.wrapHorizontalSubtitleLine(fillPaint, maxTextWidth) }
+        val layoutKey = HorizontalSubtitleLayoutKey(subtitleText, subtitleTypeface, textSizePx, maxTextWidth)
+        if (wrappedLayoutKey != layoutKey) {
+            wrappedLines = paragraphs.flatMap { it.wrapHorizontalSubtitleLine(fillPaint, maxTextWidth) }
+            wrappedLayoutKey = layoutKey
+        }
+        val lines = wrappedLines
         if (lines.isEmpty()) return
         val fontMetrics = fillPaint.fontMetrics
         val lineHeight = textSizePx * lineHeightMultiplier
@@ -4183,6 +4205,7 @@ private class VerticalSubtitleView(context: Context) : View(context) {
         }
     var subtitleTypeface: Typeface = Typeface.DEFAULT
         set(value) {
+            if (field == value) return
             field = value
             configurePaints()
             requestLayout()
@@ -4190,6 +4213,7 @@ private class VerticalSubtitleView(context: Context) : View(context) {
         }
     var subtitleTextSizePx: Float = 30f
         set(value) {
+            if (field == value) return
             field = value
             configurePaints()
             requestLayout()
