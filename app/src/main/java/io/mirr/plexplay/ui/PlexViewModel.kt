@@ -109,6 +109,7 @@ class PlexViewModel(
     private var playingItem: PlexItem? = null
     private var playbackQueue: List<PlexItem> = emptyList()
     private var playbackQueueIndex: Int = -1
+    private var playbackQueueJob: Job? = null
     private var completingPlaybackId: String? = null
     private val pendingCollectionUpdates = mutableSetOf<String>()
 
@@ -522,16 +523,22 @@ class PlexViewModel(
     }
 
     fun play(item: PlexItem) {
+        playbackQueueJob?.cancel()
         viewModelScope.launch {
             _state.update { it.copy(isLoading = true, error = null) }
             try {
-                val queue = playbackQueueFor(item, _state.value)
+                val cachedState = _state.value
+                val fullList = playbackCandidateLists(cachedState).firstOrNull { list ->
+                    list.any { it.ratingKey == item.ratingKey }
+                }.orEmpty()
+                val queue = sameFolderPlaybackQueue(item, fullList)
                 playbackQueue = queue
                 playbackQueueIndex = queue.indexOfFirst {
                     it.ratingKey == item.ratingKey
                 }.takeIf { it >= 0 } ?: 0
                 val target = playbackQueue.getOrNull(playbackQueueIndex) ?: item
                 openPlayback(target)
+                _state.value.playback?.let { refreshPlaybackQueue(it, cachedState) }
             } catch (error: Throwable) {
                 clearPlaybackQueue()
                 showError(error)
@@ -1031,6 +1038,7 @@ class PlexViewModel(
 
     fun logout() {
         browseDetailsJob?.cancel()
+        playbackQueueJob?.cancel()
         playingItem = null
         repository.logout()
         history.clear()
@@ -1076,6 +1084,7 @@ class PlexViewModel(
                         notice = "${quality.label}를 현재 재생에 적용했습니다.",
                     )
                 }
+                refreshPlaybackQueue(source, _state.value)
             } catch (error: Throwable) {
                 repository.savePlaybackQuality(previousQuality)
                 _state.update {
@@ -1120,6 +1129,7 @@ class PlexViewModel(
         notice: String? = null,
         requiredFolder: String? = null,
     ) {
+        playbackQueueJob?.cancel()
         val source = repository.playback(item).let {
             if (resetResume) it.copy(resumePositionMs = 0) else it
         }
@@ -1151,6 +1161,7 @@ class PlexViewModel(
     }
 
     private fun clearPlaybackQueue() {
+        playbackQueueJob?.cancel()
         completingPlaybackId = null
         playingItem = null
         playbackQueue = emptyList()
@@ -1163,50 +1174,43 @@ class PlexViewModel(
     private fun previousPlaybackItem(source: PlaybackSource? = _state.value.playback): PlexItem? =
         validatedPlaybackNeighbor(playingItem, source, playbackQueue.getOrNull(playbackQueueIndex - 1))
 
-    private suspend fun playbackQueueFor(
-        item: PlexItem,
-        state: PlexUiState,
-    ): List<PlexItem> {
-        val current = if (playbackFolderKey(item.filePath) == null) {
+    private fun playbackCandidateLists(state: PlexUiState): List<List<PlexItem>> = buildList {
+        // Full browsing rows take precedence over a search result or a short on-deck row.
+        add(state.items)
+        add(state.filteredItems)
+        add(state.continueWatching)
+        state.libraryContinueRows.forEach { add(it.items) }
+        state.libraryWatchedRows.forEach { add(it.items) }
+        state.homeRows.forEach { add(it.items) }
+    }
+
+    private fun refreshPlaybackQueue(source: PlaybackSource, cachedState: PlexUiState) {
+        val current = playingItem ?: return
+        playbackQueueJob?.cancel()
+        playbackQueueJob = viewModelScope.launch {
             try {
-                repository.itemDetails(item)
+                val queue = repository.folderPlaybackQueue(current, playbackCandidateLists(cachedState))
+                if (!matchesPlaybackCompletion(_state.value.playback, source)) return@launch
+                // A fresh metadata response cannot move this active session into another folder.
+                val active = current.copy(filePath = source.filePath)
+                playbackQueue = sameFolderPlaybackQueue(active, queue)
+                playbackQueueIndex = playbackQueue.indexOfFirst { it.ratingKey == source.ratingKey }
+                val previous = previousPlaybackItem(source)
+                val next = nextPlaybackItem(source)
+                _state.update {
+                    it.copy(
+                        hasPreviousPlayback = previous != null,
+                        previousPlaybackTitle = previous?.title,
+                        hasNextPlayback = next != null,
+                        nextPlaybackTitle = next?.title,
+                    )
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
-                item
-            }
-        } else {
-            item
-        }
-        if (playbackFolderKey(current.filePath) == null) return listOf(current)
-        if (
-            current.type == "episode" ||
-            current.parentRatingKey != null ||
-            current.parentKey != null
-        ) {
-            val seasonQueue = try {
-                repository.seasonSiblings(current)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                emptyList()
-            }
-            if (seasonQueue.any { it.ratingKey == item.ratingKey }) {
-                return sameFolderPlaybackQueue(current, seasonQueue)
+                // Keep already verified neighbors; queue discovery must not stop the current video.
             }
         }
-        val candidates = buildList {
-            add(state.filteredItems)
-            add(state.items)
-            add(state.continueWatching)
-            state.libraryContinueRows.forEach { add(it.items) }
-            state.libraryWatchedRows.forEach { add(it.items) }
-            state.homeRows.forEach { add(it.items) }
-        }
-        val queue = candidates.firstOrNull { items ->
-            items.any { it.ratingKey == item.ratingKey }
-        }.orEmpty()
-        return sameFolderPlaybackQueue(current, queue)
     }
 
     fun clearError() = _state.update { it.copy(error = null) }

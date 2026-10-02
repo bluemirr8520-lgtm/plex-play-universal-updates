@@ -275,6 +275,25 @@ class PlexRepository(
         return api().children(childrenPath)
     }
 
+    suspend fun folderPlaybackQueue(item: PlexItem, cachedLists: List<List<PlexItem>>): List<PlexItem> {
+        val connection = store.load()
+        val api = api(connection)
+        val current = api.metadata(item.ratingKey).singleOrNull { it.ratingKey == item.ratingKey } ?: item
+        val path = playbackCandidatePath(current)
+        val remote = if (path == null || playbackFolderKey(current.filePath) == null) emptyList() else try {
+            api.playbackCandidates(path, episodeSection = current.type == "episode")
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            emptyList()
+        }
+        val result = discoverSameFolderPlaybackQueue(current, listOf(remote) + cachedLists) { candidate ->
+            api.metadata(candidate.ratingKey).singleOrNull { it.ratingKey == candidate.ratingKey } ?: candidate
+        }
+        if (store.load() != connection) throw PlexException("서버 연결이 변경되어 이전 폴더 조회를 중지했습니다.")
+        return result
+    }
+
     suspend fun playback(item: PlexItem): PlaybackSource {
         val connection = store.load()
         // Keep manual playback's cached Part fallback, but an empty metadata

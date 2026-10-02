@@ -1,6 +1,7 @@
 package io.mirr.plexplay.ui
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.graphics.Color as AndroidColor
@@ -71,6 +72,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -104,12 +106,17 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.content.res.ResourcesCompat
 import androidx.media3.ui.CaptionStyleCompat
+import androidx.media3.ui.PlayerControlView
+import androidx.media3.ui.DefaultTimeBar
+import androidx.media3.ui.TimeBar
 import io.mirr.plexplay.R
 import io.mirr.plexplay.data.PlaybackQuality
 import io.mirr.plexplay.data.PlaybackSource
 import io.mirr.plexplay.data.PlaybackSubtitle
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
@@ -257,23 +264,6 @@ private fun VlcVideoSettings.normalizedForPlayback(
 
 private fun Float.sanitizedVlcPictureValue(): Float =
     takeIf { it.isFinite() }?.coerceIn(-50f, 50f) ?: 0f
-
-private enum class VlcOptimizationMode(
-    val storage: String,
-    val label: String,
-    val description: String,
-) {
-    AUTO("auto", "자동 최적화 · 권장", "기기 성능과 재생 형식에 맞춰 자동 조절합니다."),
-    STABILITY("stability", "재생 안정성 우선", "버퍼를 늘리고 늦은 프레임을 정리합니다."),
-    BALANCED("balanced", "균형", "화질과 재생 안정성을 균형 있게 유지합니다."),
-    PERFORMANCE("performance", "고성능·고해상도 기기", "짧은 버퍼를 사용합니다. 디코더는 위 설정을 따릅니다."),
-    ;
-
-    companion object {
-        fun fromStorage(value: String?): VlcOptimizationMode =
-            entries.firstOrNull { it.storage == value } ?: AUTO
-    }
-}
 
 private enum class VlcVideoScale(
     val storage: String,
@@ -430,6 +420,19 @@ fun VlcPlayerScreen(
         mutableStateOf(VlcDecoderMode.fromStorage(preferences.getString("vlc_decoder_mode", null)))
     }
     var softwareFallbackUsed by remember(source.playbackId, decoderMode) { mutableStateOf(false) }
+    var playbackHasProgressed by remember(source.playbackId, decoderMode) { mutableStateOf(false) }
+    val lowMemoryDevice = remember(context) {
+        runCatching {
+            val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            manager.isLowRamDevice || manager.memoryClass < 192
+        }.getOrDefault(true)
+    }
+    val bufferProfile = remember(optimizationMode, source, lowMemoryDevice) {
+        vlcBufferProfile(
+            optimizationMode, source.videoWidth, source.videoHeight,
+            source.videoFrameRate, lowMemoryDevice,
+        )
+    }
     var resumePausedAfterRestart by remember(source.playbackId) { mutableStateOf(false) }
     var selectedVideoPreset by remember { mutableIntStateOf(0) }
     var gestureFeedback by remember { mutableStateOf<String?>(null) }
@@ -500,11 +503,7 @@ fun VlcPlayerScreen(
     }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     val controlsFocusRequester = remember { FocusRequester() }
-    val previousButtonFocusRequester = remember { FocusRequester() }
-    val rewindButtonFocusRequester = remember { FocusRequester() }
-    val playButtonFocusRequester = remember { FocusRequester() }
-    val forwardButtonFocusRequester = remember { FocusRequester() }
-    val nextButtonFocusRequester = remember { FocusRequester() }
+    var transportView by remember { mutableStateOf<PlayerControlView?>(null) }
     val settingsButtonFocusRequester = remember { FocusRequester() }
     val latestAutoPlayNext by rememberUpdatedState(autoPlayNext)
     val latestHasNextPlayback by rememberUpdatedState(hasNextPlayback)
@@ -832,6 +831,39 @@ fun VlcPlayerScreen(
         }
     }
 
+    val transportCallbacks by rememberUpdatedState(
+        Triple<(Boolean) -> Unit, (Long) -> Unit, (Boolean) -> Unit>(
+            { play ->
+                controlsInteractionRevision++
+                if (play) mediaPlayer?.play() else mediaPlayer?.pause()
+            },
+            { target ->
+                controlsInteractionRevision++
+                mediaPlayer?.setTime(target, true)
+                positionMs = target
+                seekPreview = target.toFloat()
+            },
+            { next ->
+                controlsInteractionRevision++
+                if (next) onPlayNext(positionMs) else onPlayPrevious(positionMs)
+            },
+        ),
+    )
+    val transportPlayer = remember(source.playbackId) {
+        VlcTransportPlayer(
+            { transportCallbacks.first(it) }, { transportCallbacks.second(it) },
+            { transportCallbacks.third(false) }, { transportCallbacks.third(true) },
+        )
+    }
+    SideEffect {
+        transportPlayer.update(TransportSnapshot(
+            positionMs, durationMs, isPlaying, isBuffering, hasPreviousPlayback, hasNextPlayback,
+        ))
+    }
+    DisposableEffect(transportPlayer) {
+        onDispose { transportPlayer.release() }
+    }
+
     DisposableEffect(source.playbackId, source.ratingKey, source.url, videoLayout, rendererRevision) {
         val layout = videoLayout
         if (layout == null) {
@@ -843,6 +875,7 @@ fun VlcPlayerScreen(
                     subtitleStyle,
                     customFontFile,
                     optimizationMode,
+                    bufferProfile,
                 )
                 LibVLC(context.applicationContext, args)
             } catch (error: Throwable) {
@@ -911,8 +944,8 @@ fun VlcPlayerScreen(
                     // Keep native audio and subtitle decoders available.
                     media.setHWDecoderEnabled(decoder.useHardware, false)
                     decoder.mediaOptions.forEach(media::addOption)
-                    media.addOption(":network-caching=${optimizationMode.cachingMs()}")
-                    media.addOption(":file-caching=${optimizationMode.cachingMs()}")
+                    media.addOption(":network-caching=${bufferProfile.networkMs}")
+                    media.addOption(":file-caching=${bufferProfile.fileMs}")
                     media.addOption(":http-user-agent=Plex Play Universal/1.0")
                     player.media = media
                     media.release()
@@ -1075,6 +1108,7 @@ fun VlcPlayerScreen(
                                 positionMs >= playbackStartPositionMs + 250L
                             ) {
                                 playbackObservedProgress = true
+                                playbackHasProgressed = true
                             }
                             if (
                                 recoveryAnchorMs != Long.MAX_VALUE &&
@@ -1145,19 +1179,25 @@ fun VlcPlayerScreen(
                                     appliedAudioPassthrough = false
                                     runCatching { player.setAudioDigitalOutputEnabled(false) }
                                     schedulePlaybackUrl(playbackUrls[playbackUrlIndex], resumeAt)
-                                } else if (shouldRetryVlcWithSoftware(decoderMode, softwareFallbackUsed)) {
-                                    // Generic error: this is not proof of a hardware fault.
-                                    // One software attempt per source, then bounded URL recovery.
+                                } else if (recoverPlayback(resumeAt)) {
+                                    // Keep decoder choice on transient network/server failures.
+                                } else if (shouldRetryVlcWithSoftware(
+                                        decoderMode, softwareFallbackUsed,
+                                        connectionRecoveryExhausted = true,
+                                        playbackHasProgressed = playbackHasProgressed,
+                                        videoWidth = source.videoWidth,
+                                        videoHeight = source.videoHeight,
+                                    )) {
                                     softwareFallbackUsed = true
                                     isBuffering = true
                                     controlsVisible = true
-                                    errorMessage = "소프트웨어 디코더로 다시 연결합니다. 4K는 기기 성능에 따라 느릴 수 있습니다."
+                                    errorMessage = "연결 재시도 후 소프트웨어 디코더로 한 번 더 확인합니다."
                                     schedulePlaybackUrl(playbackUrls[playbackUrlIndex], resumeAt)
-                                } else if (!recoverPlayback(resumeAt)) {
+                                } else {
                                     restartingPlayback = false
                                     isBuffering = false
                                     controlsVisible = true
-                                    errorMessage = "이 파일을 범용 재생 엔진에서도 열 수 없습니다. 파일 또는 서버 연결을 확인해 주세요."
+                                    errorMessage = "파일 또는 서버 연결을 확인해 주세요. 기기에서 지원하지 않는 코덱은 설정의 소프트웨어 디코더로 시도할 수 있지만 4K는 느릴 수 있습니다."
                                 }
                             }
                         }
@@ -1281,12 +1321,17 @@ fun VlcPlayerScreen(
 
     LaunchedEffect(mediaPlayer, styledSubtitleCues) {
         val cues = styledSubtitleCues ?: return@LaunchedEffect
+        if (cues.isEmpty()) {
+            styledSubtitleText = ""
+            return@LaunchedEffect
+        }
+        val timeline = withContext(Dispatchers.Default) { SubtitleTimeline(cues) }
         while (true) {
             // TimeChanged is the reliable clock on HLS and several OTT VLC
             // builds. MediaPlayer.time can remain -1/0 even while playback is
             // advancing, which previously kept the app subtitle permanently
             // on the first (usually empty) cue.
-            styledSubtitleText = cues.textAt(positionMs.coerceAtLeast(0L))
+            styledSubtitleText = timeline.textAt(positionMs.coerceAtLeast(0L))
             delay(120)
         }
     }
@@ -1311,18 +1356,18 @@ fun VlcPlayerScreen(
         )
     }
 
-    LaunchedEffect(controlsVisible, settingsVisible, isPlaying, controlsInteractionRevision) {
-        if (controlsVisible && !settingsVisible && isPlaying) {
+    LaunchedEffect(controlsVisible, settingsVisible, isPlaying, draggingProgress, controlsInteractionRevision) {
+        if (shouldAutoHideTransport(controlsVisible, settingsVisible, isPlaying, draggingProgress)) {
             delay(7_000)
             controlsVisible = false
         }
     }
 
-    LaunchedEffect(controlsVisible, settingsVisible) {
+    LaunchedEffect(controlsVisible, settingsVisible, transportView) {
         if (settingsVisible) return@LaunchedEffect
         if (controlsVisible) {
             delay(60)
-            runCatching { playButtonFocusRequester.requestFocus() }
+            transportView?.findViewById<View>(androidx.media3.ui.R.id.exo_play_pause)?.requestFocus()
         } else {
             runCatching { controlsFocusRequester.requestFocus() }
         }
@@ -1787,154 +1832,97 @@ fun VlcPlayerScreen(
             exit = fadeOut(),
             modifier = Modifier.fillMaxSize(),
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.45f)),
-            ) {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .fillMaxWidth()
-                        .padding(20.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = onClose) {
-                        Icon(Icons.Rounded.Close, "재생 화면 닫기", tint = Color.White)
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            source.title,
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+            Box(Modifier.fillMaxSize()) {
+                AndroidView(
+                    factory = { viewContext ->
+                        PlayerControlView(viewContext).apply {
+                            transportView = this
+                            showTimeoutMs = 0 // The screen's seven-second timer owns visibility.
+                            setAnimationEnabled(false)
+                            setShowPreviousButton(true)
+                            setShowNextButton(true)
+                            setShowRewindButton(true)
+                            setShowFastForwardButton(true)
+                            findViewById<DefaultTimeBar>(androidx.media3.ui.R.id.exo_progress)?.addListener(
+                                object : TimeBar.OnScrubListener {
+                                    override fun onScrubStart(timeBar: TimeBar, position: Long) {
+                                        draggingProgress = true
+                                        controlsInteractionRevision++
+                                    }
+                                    override fun onScrubMove(timeBar: TimeBar, position: Long) = Unit
+                                    override fun onScrubStop(timeBar: TimeBar, position: Long, canceled: Boolean) {
+                                        draggingProgress = false
+                                        controlsInteractionRevision++
+                                    }
+                                },
+                            )
+                            player = transportPlayer
+                            show()
+                        }
+                    },
+                    update = { view ->
+                        transportView = view
+                        view.player = transportPlayer
+                        configureEpisodeNavigationButtons(
+                            view, hasPreviousPlayback, hasNextPlayback,
+                            { controlsInteractionRevision++; onPlayPrevious(positionMs) },
+                            { controlsInteractionRevision++; onPlayNext(positionMs) },
                         )
-                        Text(source.subtitle ?: "범용 코덱 재생", color = Color(0xFFE5A00D))
-                        Text(
-                            "이전화 · ${previousPlaybackTitle ?: "없음"}   |   " +
-                                "다음화 · ${nextPlaybackTitle ?: "없음"}",
-                            color = Color.White.copy(alpha = .78f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    VideoSizeControls(videoScale.storage) { value ->
+                        view.findViewById<View>(androidx.media3.ui.R.id.exo_settings)?.visibility = View.GONE
+                        for (id in listOf(
+                            androidx.media3.ui.R.id.exo_prev, androidx.media3.ui.R.id.exo_rew,
+                            androidx.media3.ui.R.id.exo_play_pause, androidx.media3.ui.R.id.exo_ffwd,
+                            androidx.media3.ui.R.id.exo_next,
+                            androidx.media3.ui.R.id.exo_rew_with_amount, androidx.media3.ui.R.id.exo_ffwd_with_amount,
+                        )) {
+                            view.findViewById<View>(id)?.setOnKeyListener { _, _, event ->
+                                if (event.keyCode == AndroidKeyEvent.KEYCODE_DPAD_UP) {
+                                    if (event.action == AndroidKeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                                        settingsButtonFocusRequester.requestFocus()
+                                    }
+                                    true
+                                } else false
+                            }
+                        }
+                    },
+                    onRelease = { view ->
+                        view.player = null
+                        draggingProgress = false
+                        if (transportView === view) transportView = null
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+                PlaybackTopControls(
+                    title = source.title,
+                    subtitle = source.subtitle,
+                    previousTitle = previousPlaybackTitle.takeIf { hasPreviousPlayback },
+                    nextTitle = nextPlaybackTitle.takeIf { hasNextPlayback },
+                    videoSize = videoScale.storage,
+                    onVideoSize = { value ->
                         videoScale = VlcVideoScale.fromStorage(value)
                         preferences.edit().putString("video_scale_mode", value).apply()
                         controlsInteractionRevision++
-                    }
-                    VlcPlayerSettingsButton(
-                        onClick = {
-                            openSettings()
+                    },
+                    onClose = {
+                        mediaPlayer?.pause()
+                        onProgress(source, positionMs, "paused")
+                        onClose()
+                    },
+                    onSettings = { openSettings() },
+                    settingsModifier = Modifier.focusRequester(settingsButtonFocusRequester)
+                        .onPreviewKeyEvent { event ->
+                            val native = event.nativeKeyEvent
+                            if (native.keyCode == AndroidKeyEvent.KEYCODE_DPAD_DOWN) {
+                                if (native.action == AndroidKeyEvent.ACTION_DOWN && native.repeatCount == 0) {
+                                    transportView?.findViewById<View>(androidx.media3.ui.R.id.exo_play_pause)?.requestFocus()
+                                }
+                                true
+                            } else false
                         },
-                        modifier = Modifier
-                            .focusRequester(settingsButtonFocusRequester)
-                            .focusProperties { down = playButtonFocusRequester },
-                    )
-                }
-
-                Row(
-                    modifier = Modifier.align(Alignment.Center),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    VlcPlayerControlButton(
-                        enabled = hasPreviousPlayback,
-                        onClick = { onPlayPrevious(positionMs) },
-                        modifier = Modifier
-                            .size(56.dp)
-                            .focusRequester(previousButtonFocusRequester)
-                            .focusProperties { right = rewindButtonFocusRequester },
-                        icon = Icons.Rounded.SkipPrevious,
-                        contentDescription = previousPlaybackTitle ?: "이전화",
-                    )
-                    VlcPlayerControlButton(
-                        onClick = { seekBy(-10_000L) },
-                        modifier = Modifier
-                            .size(56.dp)
-                            .focusRequester(rewindButtonFocusRequester)
-                            .focusProperties {
-                                left = previousButtonFocusRequester
-                                right = playButtonFocusRequester
-                            },
-                        icon = Icons.Rounded.FastRewind,
-                        contentDescription = "10초 뒤로",
-                    )
-                    VlcPlayerControlButton(
-                        onClick = ::togglePlayback,
-                        modifier = Modifier
-                            .size(76.dp)
-                            .focusRequester(playButtonFocusRequester)
-                            .focusProperties {
-                                left = rewindButtonFocusRequester
-                                right = forwardButtonFocusRequester
-                                up = settingsButtonFocusRequester
-                            },
-                        icon = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                        contentDescription = if (isPlaying) "일시정지" else "재생",
-                        iconSize = 58,
-                    )
-                    VlcPlayerControlButton(
-                        onClick = { seekBy(10_000L) },
-                        modifier = Modifier
-                            .size(56.dp)
-                            .focusRequester(forwardButtonFocusRequester)
-                            .focusProperties {
-                                left = playButtonFocusRequester
-                                right = nextButtonFocusRequester
-                                up = settingsButtonFocusRequester
-                            },
-                        icon = Icons.Rounded.FastForward,
-                        contentDescription = "10초 앞으로",
-                    )
-                    VlcPlayerControlButton(
-                        enabled = hasNextPlayback,
-                        onClick = { onPlayNext(positionMs) },
-                        modifier = Modifier
-                            .size(56.dp)
-                            .focusRequester(nextButtonFocusRequester)
-                            .focusProperties {
-                                left = forwardButtonFocusRequester
-                                up = settingsButtonFocusRequester
-                            },
-                        icon = Icons.Rounded.SkipNext,
-                        contentDescription = nextPlaybackTitle ?: "다음화",
-                    )
-                }
-
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .padding(horizontal = 32.dp, vertical = 20.dp),
-                ) {
-                    errorMessage?.let {
-                        Text(it, color = Color(0xFFFF6B6B), modifier = Modifier.padding(bottom = 8.dp))
-                    }
-                    if (isBuffering) {
-                        Text("범용 재생 준비 중…", color = Color.White)
-                    }
-                    Slider(
-                        value = seekPreview.coerceIn(0f, durationMs.toFloat()),
-                        onValueChange = {
-                            draggingProgress = true
-                            seekPreview = it
-                        },
-                        onValueChangeFinished = {
-                            val target = seekPreview.roundToLong()
-                            mediaPlayer?.setTime(target, true)
-                            positionMs = target
-                            draggingProgress = false
-                        },
-                        valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
-                    )
-                    Row(Modifier.fillMaxWidth()) {
-                        Text(formatVlcTime(positionMs), color = Color.White)
-                        Spacer(Modifier.weight(1f))
-                        Text(formatVlcTime(durationMs), color = Color.White)
-                    }
+                )
+                Column(Modifier.align(Alignment.BottomCenter).padding(bottom = 84.dp, start = 32.dp, end = 32.dp)) {
+                    errorMessage?.let { Text(it, color = Color(0xFFFF6B6B)) }
+                    if (isBuffering) Text("재생 준비 중…", color = Color.White)
                 }
             }
         }
@@ -3183,10 +3171,11 @@ private fun buildVlcArguments(
     style: VlcSubtitleStyle,
     customFontFile: File,
     optimizationMode: VlcOptimizationMode,
+    bufferProfile: VlcBufferProfile,
 ): ArrayList<String> = arrayListOf<String>().apply {
     add("--audio-time-stretch")
-    add("--network-caching=${optimizationMode.cachingMs()}")
-    add("--file-caching=${optimizationMode.cachingMs()}")
+    add("--network-caching=${bufferProfile.networkMs}")
+    add("--file-caching=${bufferProfile.fileMs}")
     if (optimizationMode == VlcOptimizationMode.STABILITY) {
         add("--drop-late-frames")
         add("--skip-frames")
@@ -3231,14 +3220,6 @@ private fun VlcSubtitleFont.vlcFontFamily(): String = when (this) {
     VlcSubtitleFont.CUSTOM,
     VlcSubtitleFont.GOTHIC,
     -> "sans-serif"
-}
-
-private fun VlcOptimizationMode.cachingMs(): Int = when (this) {
-    VlcOptimizationMode.STABILITY -> 2_500
-    VlcOptimizationMode.PERFORMANCE -> 800
-    VlcOptimizationMode.AUTO,
-    VlcOptimizationMode.BALANCED,
-    -> 1_500
 }
 
 private fun applyVlcWindowBrightness(activity: Activity?, brightnessPercent: Float) {

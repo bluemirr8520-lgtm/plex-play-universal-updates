@@ -1212,6 +1212,8 @@ fun PlayerScreen(
                 DefaultLoadErrorHandlingPolicy(6),
             )
         ExoPlayer.Builder(context, renderersFactory)
+            .setSeekBackIncrementMs(10_000)
+            .setSeekForwardIncrementMs(10_000)
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
             .build()
@@ -1746,9 +1748,14 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(player, manualSubtitleCues) {
+        if (manualSubtitleCues.isEmpty()) {
+            manualSubtitleText = ""
+            return@LaunchedEffect
+        }
+        val timeline = withContext(Dispatchers.Default) { SubtitleTimeline(manualSubtitleCues) }
         while (true) {
             manualSubtitleText =
-                manualSubtitleCues.textAt(player.currentPosition.coerceAtLeast(0))
+                timeline.textAt(player.currentPosition.coerceAtLeast(0))
             delay(120)
         }
     }
@@ -2221,106 +2228,28 @@ fun PlayerScreen(
         )
         AnimatedVisibility(
             visible = controllerVisible && !playerSettingsVisible,
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .statusBarsPadding()
-                .padding(12.dp),
+            modifier = Modifier.align(Alignment.TopCenter),
             enter = fadeIn(),
             exit = fadeOut(),
         ) {
-            PlayerControlButton(
-                icon = Icons.Rounded.Close,
-                contentDescription = "재생 화면 닫기",
-                onClick = {
-                    player.pause()
-                    onProgress(
-                        source,
-                        player.currentPosition.coerceAtLeast(0),
-                        "paused",
-                    )
-                    onClose()
-                },
-            )
-        }
-        AnimatedVisibility(
-            visible = controllerVisible && !playerSettingsVisible,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .statusBarsPadding()
-                .padding(12.dp),
-            enter = fadeIn(),
-            exit = fadeOut(),
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                VideoSizeControls(videoScaleMode.storageValue) { value ->
+            PlaybackTopControls(
+                title = source.title,
+                subtitle = source.subtitle,
+                previousTitle = previousPlaybackTitle.takeIf { hasPreviousPlayback },
+                nextTitle = nextPlaybackTitle.takeIf { hasNextPlayback },
+                videoSize = videoScaleMode.storageValue,
+                onVideoSize = { value ->
                     videoScaleMode = VideoScaleMode.fromStorage(value)
                     playerPreferences.edit().putString("video_scale_mode", value).apply()
                     playerViewHandle?.showController()
-                }
-                PlayerControlButton(
-                    icon = Icons.Rounded.Settings,
-                    contentDescription = "재생 설정",
-                    onClick = { openPlayerSettings() },
-                )
-            }
-        }
-        AnimatedVisibility(
-            visible = controllerVisible && !playerSettingsVisible,
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .statusBarsPadding()
-                .padding(start = 72.dp, end = 232.dp, top = 14.dp, bottom = 14.dp),
-            enter = fadeIn(),
-            exit = fadeOut(),
-        ) {
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = Color.Black.copy(alpha = .68f),
-            ) {
-                Column(
-                    modifier = Modifier.padding(
-                        horizontal = 18.dp,
-                        vertical = 10.dp,
-                    ),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text(
-                        text = source.title,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        textAlign = TextAlign.Center,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    source.subtitle?.takeIf { it.isNotBlank() }?.let {
-                        Text(
-                            text = it,
-                            color = Color.White.copy(alpha = .78f),
-                            textAlign = TextAlign.Center,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    if (hasPreviousPlayback && !previousPlaybackTitle.isNullOrBlank()) {
-                        Text(
-                            text = "이전: $previousPlaybackTitle",
-                            color = Color.White.copy(alpha = .72f),
-                            textAlign = TextAlign.Center,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    if (hasNextPlayback && !nextPlaybackTitle.isNullOrBlank()) {
-                        Text(
-                            text = "다음화: $nextPlaybackTitle",
-                            color = PlayerMenuFocusColor,
-                            textAlign = TextAlign.Center,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-            }
+                },
+                onClose = {
+                    player.pause()
+                    onProgress(source, player.currentPosition.coerceAtLeast(0), "paused")
+                    onClose()
+                },
+                onSettings = { openPlayerSettings() },
+            )
         }
         AnimatedVisibility(
             visible = gestureFeedback != null,
@@ -4693,8 +4622,8 @@ private fun formatGestureTime(milliseconds: Long): String {
     }
 }
 
-private fun configureEpisodeNavigationButtons(
-    playerView: PlayerView,
+internal fun configureEpisodeNavigationButtons(
+    playerView: View,
     hasPrevious: Boolean,
     hasNext: Boolean,
     onPrevious: () -> Unit,
@@ -4704,10 +4633,12 @@ private fun configureEpisodeNavigationButtons(
         playerView.findViewById<View>(androidx.media3.ui.R.id.exo_prev)
     val rewind =
         playerView.findViewById<View>(androidx.media3.ui.R.id.exo_rew)
+            ?: playerView.findViewById<View>(androidx.media3.ui.R.id.exo_rew_with_amount)
     val playPause =
         playerView.findViewById<View>(androidx.media3.ui.R.id.exo_play_pause)
     val fastForward =
         playerView.findViewById<View>(androidx.media3.ui.R.id.exo_ffwd)
+            ?: playerView.findViewById<View>(androidx.media3.ui.R.id.exo_ffwd_with_amount)
     val next =
         playerView.findViewById<View>(androidx.media3.ui.R.id.exo_next)
 
@@ -4718,7 +4649,7 @@ private fun configureEpisodeNavigationButtons(
         alpha = if (hasPrevious) 1f else .28f
         contentDescription = "이전화"
         setOnClickListener(if (hasPrevious) View.OnClickListener { onPrevious() } else null)
-        nextFocusRightId = androidx.media3.ui.R.id.exo_rew
+        nextFocusRightId = rewind?.id ?: View.NO_ID
     }
     rewind?.apply {
         isFocusable = true
@@ -4733,8 +4664,8 @@ private fun configureEpisodeNavigationButtons(
     playPause?.apply {
         isFocusable = true
         contentDescription = "재생 또는 일시정지"
-        nextFocusLeftId = androidx.media3.ui.R.id.exo_rew
-        nextFocusRightId = androidx.media3.ui.R.id.exo_ffwd
+        nextFocusLeftId = rewind?.id ?: View.NO_ID
+        nextFocusRightId = fastForward?.id ?: View.NO_ID
     }
     fastForward?.apply {
         isFocusable = true
@@ -4753,7 +4684,7 @@ private fun configureEpisodeNavigationButtons(
         alpha = if (hasNext) 1f else .28f
         contentDescription = "다음화"
         setOnClickListener(if (hasNext) View.OnClickListener { onNext() } else null)
-        nextFocusLeftId = androidx.media3.ui.R.id.exo_ffwd
+        nextFocusLeftId = fastForward?.id ?: View.NO_ID
     }
 }
 

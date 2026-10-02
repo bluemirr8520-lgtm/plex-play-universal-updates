@@ -30,8 +30,16 @@ internal fun vlcDecoderConfiguration(
     )
 }
 
-/** Once per PlaybackSource, not reset by network reconnection or renderer restarts. */
+/** Generic VLC errors cannot establish a hardware failure. Recover the connection first. */
 internal fun shouldRetryVlcWithSoftware(
     mode: VlcDecoderMode,
     softwareFallbackUsed: Boolean,
-): Boolean = mode == VlcDecoderMode.AUTO && !softwareFallbackUsed
+    connectionRecoveryExhausted: Boolean,
+    playbackHasProgressed: Boolean,
+    videoWidth: Int?,
+    videoHeight: Int?,
+): Boolean = mode == VlcDecoderMode.AUTO && !softwareFallbackUsed &&
+    connectionRecoveryExhausted && !playbackHasProgressed &&
+    // Unknown dimensions may also be UHD. Software remains a manual option for any file.
+    (videoWidth ?: 0) > 0 && (videoHeight ?: 0) > 0 &&
+    !isVlcUhdVideo(videoWidth, videoHeight)

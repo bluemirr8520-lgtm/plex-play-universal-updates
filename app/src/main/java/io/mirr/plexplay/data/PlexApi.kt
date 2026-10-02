@@ -221,6 +221,22 @@ class PlexApi(
             query = mapOf("includeMedia" to "1"),
         ) { PlexXmlParser.items(it) }
 
+    suspend fun playbackCandidates(path: String, episodeSection: Boolean = false): List<PlexItem> =
+        loadPlaybackCandidatePages { start ->
+            request(
+                path = path.ensurePath(),
+                query = buildMap {
+                    put("includeMedia", "1")
+                    put("X-Plex-Container-Start", start.toString())
+                    put("X-Plex-Container-Size", "200")
+                    if (path.startsWith("/library/sections/")) {
+                        put("sort", "titleSort:asc")
+                        if (episodeSection) put("type", "4")
+                    }
+                },
+            ) { PlexXmlParser.items(it) }
+        }
+
     suspend fun metadata(ratingKey: String): List<PlexItem> =
         request(
             path = "/library/metadata/$ratingKey",
