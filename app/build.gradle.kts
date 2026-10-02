@@ -23,8 +23,8 @@ android {
         applicationId = "io.mirr.plexplay.universal"
         minSdk = 26
         targetSdk = 36
-        versionCode = 37
-        versionName = "1.0.36"
+        versionCode = 38
+        versionName = "1.0.37"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

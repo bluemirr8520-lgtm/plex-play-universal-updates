@@ -655,8 +655,17 @@ fun VlcPlayerScreen(
     val styledSubtitleTypeface = remember(subtitleStyle.font, customFontRevision) {
         resolveVlcSubtitleTypeface(context, subtitleStyle.font, customFontFile)
     }
-    val sharedSubtitleAppearance = remember(subtitleStyle) {
-        subtitleStyle.toSharedSubtitleAppearance()
+    val subtitleDrag = remember(source.playbackId, source.url, subtitleStyle) { SubtitleDragState() }
+    val subtitleDragPreview = subtitleDrag.preview
+    val sharedSubtitleAppearance = remember(subtitleStyle, subtitleDragPreview) {
+        subtitleStyle.toSharedSubtitleAppearance().let { appearance ->
+            subtitleDragPreview?.let { position ->
+                appearance.copy(
+                    horizontalOffsetPercent = position.horizontal,
+                    verticalOffsetPercent = position.vertical,
+                )
+            } ?: appearance
+        }
     }
 
     fun applySubtitleStyleChange(updated: VlcSubtitleStyle) {
@@ -1626,6 +1635,7 @@ fun VlcPlayerScreen(
                 audioManager,
                 videoScale,
                 subtitleStyle,
+                subtitleDrag,
                 useAppSubtitleOverlay,
             ) {
                 var startX = 0f
@@ -1637,11 +1647,6 @@ fun VlcPlayerScreen(
                 var startBrightness = .5f
                 var startPosition = 0L
                 var seekTarget = 0L
-                var startSubtitleHorizontal = 0
-                var startSubtitleVertical = 0
-                var subtitleHorizontalTarget = 0
-                var subtitleVerticalTarget = 0
-
                 detectDragGestures(
                     onDragStart = { offset ->
                         startX = offset.x
@@ -1655,12 +1660,15 @@ fun VlcPlayerScreen(
                             ?: (videoSettings.screenBrightness / 100f)
                         startPosition = mediaPlayer?.time?.coerceAtLeast(0L) ?: positionMs
                         seekTarget = startPosition
-                        startSubtitleHorizontal = subtitleStyle.horizontalOffsetPercent
-                        startSubtitleVertical = subtitleStyle.verticalOffsetPercent
-                        subtitleHorizontalTarget = startSubtitleHorizontal
-                        subtitleVerticalTarget = startSubtitleVertical
+                        subtitleDrag.start(
+                            subtitleStyle.horizontalOffsetPercent,
+                            subtitleStyle.verticalOffsetPercent,
+                        )
                     },
-                    onDragCancel = { mode = null },
+                    onDragCancel = {
+                        subtitleDrag.cancel()
+                        mode = null
+                    },
                     onDragEnd = {
                         when (mode) {
                             VlcGestureMode.SEEK -> {
@@ -1690,14 +1698,18 @@ fun VlcPlayerScreen(
                                 }
                             }
                             VlcGestureMode.SUBTITLE_POSITION -> {
-                                val updated = subtitleStyle.copy(
-                                    horizontalOffsetPercent = subtitleHorizontalTarget,
-                                    verticalOffsetPercent = subtitleVerticalTarget,
-                                )
-                                applySubtitleStyleChange(updated)
+                                subtitleDrag.finish()?.let { position ->
+                                    applySubtitleStyleChange(
+                                        subtitleStyle.copy(
+                                            horizontalOffsetPercent = position.horizontal,
+                                            verticalOffsetPercent = position.vertical,
+                                        ),
+                                    )
+                                }
                             }
                             else -> Unit
                         }
+                        subtitleDrag.cancel()
                         mode = null
                     },
                 ) { change, dragAmount ->
@@ -1767,15 +1779,14 @@ fun VlcPlayerScreen(
                         }
                         VlcGestureMode.SUBTITLE_POSITION -> {
                             change.consume()
-                            subtitleHorizontalTarget = (
-                                startSubtitleHorizontal + totalX / size.width * 100f
-                                ).roundToInt().coerceIn(-100, 100)
-                            subtitleVerticalTarget = (
-                                startSubtitleVertical + totalY / size.height * 100f
-                                ).roundToInt().coerceIn(-100, 100)
-                            showGestureFeedback(
-                                "자막 위치 가로 $subtitleHorizontalTarget  세로 $subtitleVerticalTarget",
-                            )
+                            // Only the overlay observes this preview. Keeping the saved style
+                            // (and pointerInput keys) unchanged preserves the active drag and
+                            // avoids preference writes or decoder changes on every movement.
+                            subtitleDrag.move(totalX, totalY, size.width, size.height)?.let { position ->
+                                showGestureFeedback(
+                                    "자막 위치 가로 ${position.horizontal}  세로 ${position.vertical}",
+                                )
+                            }
                         }
                         null -> Unit
                     }
