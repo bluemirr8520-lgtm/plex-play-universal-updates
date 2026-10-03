@@ -456,6 +456,7 @@ fun VlcPlayerScreen(
     var controlsInteractionRevision by remember { mutableIntStateOf(0) }
     var leftLongPressSeeking by remember { mutableStateOf(false) }
     var rightLongPressSeeking by remember { mutableStateOf(false) }
+    val remoteSeek = remember(source.playbackId, source.url, rendererRevision) { RemoteSeekState() }
     var confirmLongPressConsumed by remember { mutableStateOf(false) }
     var isPlaying by remember { mutableStateOf(false) }
     var isBuffering by remember { mutableStateOf(true) }
@@ -773,7 +774,15 @@ fun VlcPlayerScreen(
         gestureFeedbackRevision++
     }
 
+    fun cancelRemoteSeek() {
+        remoteSeek.cancel()
+        leftLongPressSeeking = false
+        rightLongPressSeeking = false
+    }
+    val latestCancelRemoteSeek by rememberUpdatedState({ cancelRemoteSeek() })
+
     fun openSettings(page: VlcSettingsPage = VlcSettingsPage.MAIN) {
+        cancelRemoteSeek()
         audioRouteRevision++
         controlsVisible = false
         settingsPage = page
@@ -807,19 +816,40 @@ fun VlcPlayerScreen(
         videoLayout?.let { applyVlcVideoAppearance(it, normalized) }
     }
 
-    fun seekBy(deltaMs: Long) {
-        val player = mediaPlayer ?: return
-        val target = (player.time + deltaMs).coerceIn(0L, player.length.coerceAtLeast(0L))
+    fun remoteSeekDuration(): Long = mediaPlayer?.length?.takeIf { it > 0L } ?: source.durationMs
+
+    fun commitRemoteSeek() {
+        val player = mediaPlayer ?: run { remoteSeek.cancel(); return }
+        val target = remoteSeek.finish(remoteSeekDuration()) ?: return
         player.setTime(target, true)
         positionMs = target
         seekPreview = target.toFloat()
         controlsVisible = true
+        showGestureFeedback("이동 ${formatVlcTime(target)}")
+    }
+
+    fun seekBy(deltaMs: Long, deferred: Boolean = false) {
+        val player = mediaPlayer ?: return
+        val clock = player.time.takeIf { it > 0L } ?: positionMs
+        val target = remoteSeek.step(deltaMs, clock, remoteSeekDuration()) ?: return
+        if (!deferred) commitRemoteSeek()
+        controlsVisible = true
         showGestureFeedback(
-            if (deltaMs >= 0) "+${formatVlcTime(deltaMs)}" else "−${formatVlcTime(-deltaMs)}",
+            if (deferred) "이동 ${formatVlcTime(target)}"
+            else if (deltaMs >= 0) "+${formatVlcTime(deltaMs)}" else "−${formatVlcTime(-deltaMs)}",
         )
     }
 
+    LaunchedEffect(remoteSeek, remoteSeek.previewMs, remoteSeek.revision) {
+        if (remoteSeek.previewMs != null) {
+            delay(RemoteSeekIdleMs)
+            commitRemoteSeek()
+        }
+    }
+    DisposableEffect(remoteSeek) { onDispose { remoteSeek.cancel() } }
+
     fun togglePlayback() {
+        cancelRemoteSeek()
         val player = mediaPlayer ?: return
         if (player.isPlaying) player.pause() else player.play()
         controlsVisible = true
@@ -860,16 +890,19 @@ fun VlcPlayerScreen(
     val transportCallbacks by rememberUpdatedState(
         Triple<(Boolean) -> Unit, (Long) -> Unit, (Boolean) -> Unit>(
             { play ->
+                cancelRemoteSeek()
                 controlsInteractionRevision++
                 if (play) mediaPlayer?.play() else mediaPlayer?.pause()
             },
             { target ->
+                cancelRemoteSeek()
                 controlsInteractionRevision++
                 mediaPlayer?.setTime(target, true)
                 positionMs = target
                 seekPreview = target.toFloat()
             },
             { next ->
+                cancelRemoteSeek()
                 controlsInteractionRevision++
                 if (next) onPlayNext(positionMs) else onPlayPrevious(positionMs)
             },
@@ -883,7 +916,7 @@ fun VlcPlayerScreen(
     }
     SideEffect {
         transportPlayer.update(TransportSnapshot(
-            positionMs, durationMs, isPlaying, isBuffering, hasPreviousPlayback, hasNextPlayback,
+            remoteSeek.previewMs ?: positionMs, durationMs, isPlaying, isBuffering, hasPreviousPlayback, hasNextPlayback,
         ))
     }
     DisposableEffect(transportPlayer) {
@@ -1162,6 +1195,7 @@ fun VlcPlayerScreen(
                             updateTrackLists(player)
                         }
                         MediaPlayer.Event.EndReached -> {
+                            cancelRemoteSeek()
                             if (!completed) {
                                 val actualPosition = player.time
                                     .coerceAtLeast(positionMs)
@@ -1196,6 +1230,7 @@ fun VlcPlayerScreen(
                             }
                         }
                         MediaPlayer.Event.EncounteredError -> {
+                            cancelRemoteSeek()
                             isPlaying = false
                             if (!restartingPlayback) {
                                 val resumeAt = player.time.coerceAtLeast(positionMs).coerceAtLeast(0L)
@@ -1427,7 +1462,10 @@ fun VlcPlayerScreen(
     }
 
     BackHandler {
-        if (settingsVisible) navigateBackFromSettings() else onClose()
+        if (settingsVisible) navigateBackFromSettings() else {
+            cancelRemoteSeek()
+            onClose()
+        }
     }
 
     fun handleRemoteKey(nativeEvent: AndroidKeyEvent): Boolean {
@@ -1436,6 +1474,31 @@ fun VlcPlayerScreen(
         val isUp = nativeEvent.action == AndroidKeyEvent.ACTION_UP
         if (!isDown && !isUp) return false
         if (isDown) controlsInteractionRevision++
+        if (isUp && nativeEvent.isCanceled) {
+            cancelRemoteSeek()
+            return true
+        }
+        val heldDirectionReleased = isUp && (
+            (nativeEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_LEFT && leftLongPressSeeking) ||
+                (nativeEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_RIGHT && rightLongPressSeeking)
+            )
+        val mediaSeekReleased = isUp && nativeEvent.keyCode in listOf(
+            AndroidKeyEvent.KEYCODE_MEDIA_REWIND, AndroidKeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
+            AndroidKeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD, AndroidKeyEvent.KEYCODE_MEDIA_SKIP_FORWARD,
+            AndroidKeyEvent.KEYCODE_MEDIA_STEP_BACKWARD, AndroidKeyEvent.KEYCODE_MEDIA_STEP_FORWARD,
+            AndroidKeyEvent.KEYCODE_BUTTON_L1, AndroidKeyEvent.KEYCODE_BUTTON_R1,
+            AndroidKeyEvent.KEYCODE_MEDIA_PREVIOUS, AndroidKeyEvent.KEYCODE_CHANNEL_DOWN,
+        )
+        if (heldDirectionReleased || mediaSeekReleased) {
+            commitRemoteSeek()
+            leftLongPressSeeking = false
+            rightLongPressSeeking = false
+            return true
+        }
+        if (controlsVisible && nativeEvent.keyCode in listOf(
+                AndroidKeyEvent.KEYCODE_DPAD_LEFT, AndroidKeyEvent.KEYCODE_DPAD_RIGHT,
+            ) && transportView?.findViewById<View>(androidx.media3.ui.R.id.exo_progress)?.hasFocus() == true
+        ) return false
 
         val controllerNavigationKey = nativeEvent.keyCode in listOf(
             AndroidKeyEvent.KEYCODE_DPAD_CENTER,
@@ -1453,14 +1516,6 @@ fun VlcPlayerScreen(
         if (controlsVisible && controllerNavigationKey && nativeEvent.repeatCount == 0) {
             if (isUp) {
                 when (nativeEvent.keyCode) {
-                    AndroidKeyEvent.KEYCODE_DPAD_LEFT -> if (leftLongPressSeeking) {
-                        leftLongPressSeeking = false
-                        return true
-                    }
-                    AndroidKeyEvent.KEYCODE_DPAD_RIGHT -> if (rightLongPressSeeking) {
-                        rightLongPressSeeking = false
-                        return true
-                    }
                     AndroidKeyEvent.KEYCODE_DPAD_CENTER,
                     AndroidKeyEvent.KEYCODE_ENTER,
                     AndroidKeyEvent.KEYCODE_NUMPAD_ENTER,
@@ -1506,21 +1561,27 @@ fun VlcPlayerScreen(
             }
 
             AndroidKeyEvent.KEYCODE_MEDIA_PLAY -> {
-                if (isDown && nativeEvent.repeatCount == 0) mediaPlayer?.play()
+                if (isDown && nativeEvent.repeatCount == 0) {
+                    cancelRemoteSeek()
+                    mediaPlayer?.play()
+                }
                 true
             }
 
             AndroidKeyEvent.KEYCODE_MEDIA_PAUSE -> {
-                if (isDown && nativeEvent.repeatCount == 0) mediaPlayer?.pause()
+                if (isDown && nativeEvent.repeatCount == 0) {
+                    cancelRemoteSeek()
+                    mediaPlayer?.pause()
+                }
                 true
             }
 
             AndroidKeyEvent.KEYCODE_DPAD_LEFT -> {
                 if (isDown && nativeEvent.repeatCount > 0) {
                     leftLongPressSeeking = true
-                    seekBy(-10_000L)
+                    seekBy(-10_000L, deferred = true)
                 } else if (isUp) {
-                    if (leftLongPressSeeking) leftLongPressSeeking = false else seekBy(-10_000L)
+                    seekBy(-10_000L)
                 }
                 true
             }
@@ -1528,9 +1589,9 @@ fun VlcPlayerScreen(
             AndroidKeyEvent.KEYCODE_DPAD_RIGHT -> {
                 if (isDown && nativeEvent.repeatCount > 0) {
                     rightLongPressSeeking = true
-                    seekBy(10_000L)
+                    seekBy(10_000L, deferred = true)
                 } else if (isUp) {
-                    if (rightLongPressSeeking) rightLongPressSeeking = false else seekBy(10_000L)
+                    seekBy(10_000L)
                 }
                 true
             }
@@ -1540,7 +1601,7 @@ fun VlcPlayerScreen(
             AndroidKeyEvent.KEYCODE_MEDIA_STEP_BACKWARD,
             AndroidKeyEvent.KEYCODE_BUTTON_L1,
             -> {
-                if (isDown) seekBy(-10_000L)
+                if (isDown) seekBy(-10_000L, deferred = nativeEvent.repeatCount > 0)
                 true
             }
 
@@ -1549,7 +1610,7 @@ fun VlcPlayerScreen(
             AndroidKeyEvent.KEYCODE_MEDIA_STEP_FORWARD,
             AndroidKeyEvent.KEYCODE_BUTTON_R1,
             -> {
-                if (isDown) seekBy(10_000L)
+                if (isDown) seekBy(10_000L, deferred = nativeEvent.repeatCount > 0)
                 true
             }
 
@@ -1557,10 +1618,11 @@ fun VlcPlayerScreen(
             AndroidKeyEvent.KEYCODE_CHANNEL_DOWN,
             -> {
                 if (isDown && nativeEvent.repeatCount == 0 && hasPreviousPlayback) {
+                    cancelRemoteSeek()
                     onPlayPrevious(positionMs)
                     showGestureFeedback("이전화")
                 } else if (isDown) {
-                    seekBy(-10_000L)
+                    seekBy(-10_000L, deferred = nativeEvent.repeatCount > 0)
                 }
                 true
             }
@@ -1570,6 +1632,7 @@ fun VlcPlayerScreen(
             -> {
                 if (isDown && nativeEvent.repeatCount == 0) {
                     if (hasNextPlayback) {
+                        cancelRemoteSeek()
                         onPlayNext(positionMs)
                         showGestureFeedback("다음화")
                     } else {
@@ -1609,6 +1672,7 @@ fun VlcPlayerScreen(
 
             AndroidKeyEvent.KEYCODE_MEDIA_STOP -> {
                 if (isDown && nativeEvent.repeatCount == 0) {
+                    cancelRemoteSeek()
                     mediaPlayer?.pause()
                     onProgress(source, positionMs, "stopped")
                     onClose()
@@ -1680,6 +1744,7 @@ fun VlcPlayerScreen(
                 var seekTarget = 0L
                 detectDragGestures(
                     onDragStart = { offset ->
+                        cancelRemoteSeek()
                         startX = offset.x
                         startY = offset.y
                         totalX = 0f
@@ -1888,6 +1953,7 @@ fun VlcPlayerScreen(
                             findViewById<DefaultTimeBar>(androidx.media3.ui.R.id.exo_progress)?.addListener(
                                 object : TimeBar.OnScrubListener {
                                     override fun onScrubStart(timeBar: TimeBar, position: Long) {
+                                        latestCancelRemoteSeek()
                                         draggingProgress = true
                                         controlsInteractionRevision++
                                     }
@@ -1907,8 +1973,8 @@ fun VlcPlayerScreen(
                         view.player = transportPlayer
                         configureEpisodeNavigationButtons(
                             view, hasPreviousPlayback, hasNextPlayback,
-                            { controlsInteractionRevision++; onPlayPrevious(positionMs) },
-                            { controlsInteractionRevision++; onPlayNext(positionMs) },
+                            { cancelRemoteSeek(); controlsInteractionRevision++; onPlayPrevious(positionMs) },
+                            { cancelRemoteSeek(); controlsInteractionRevision++; onPlayNext(positionMs) },
                         )
                         view.findViewById<View>(androidx.media3.ui.R.id.exo_settings)?.visibility = View.GONE
                         for (id in listOf(
@@ -1946,6 +2012,7 @@ fun VlcPlayerScreen(
                         controlsInteractionRevision++
                     },
                     onClose = {
+                        cancelRemoteSeek()
                         mediaPlayer?.pause()
                         onProgress(source, positionMs, "paused")
                         onClose()

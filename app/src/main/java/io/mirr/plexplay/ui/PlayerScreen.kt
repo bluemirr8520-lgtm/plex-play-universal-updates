@@ -109,6 +109,7 @@ import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.TimeBar
 import io.mirr.plexplay.BuildConfig
 import io.mirr.plexplay.R
 import io.mirr.plexplay.data.PlaybackSource
@@ -1257,17 +1258,27 @@ fun PlayerScreen(
     }
 
     var confirmLongPressConsumed by remember { mutableStateOf(false) }
-    var leftLongPressSeeking by remember { mutableStateOf(false) }
-    var rightLongPressSeeking by remember { mutableStateOf(false) }
-    val lastHandledRemoteEventSignature = remember { LongArray(1) }
+    var leftLongPressSeeking by remember(player) { mutableStateOf(false) }
+    var rightLongPressSeeking by remember(player) { mutableStateOf(false) }
+    val lastHandledRemoteEventSignature = remember(player) { LongArray(1) }
+    val remoteSeek = remember(player) { RemoteSeekState() }
+
+    fun cancelRemoteSeek() {
+        remoteSeek.cancel()
+        leftLongPressSeeking = false
+        rightLongPressSeeking = false
+    }
+    val latestCancelRemoteSeek by rememberUpdatedState({ cancelRemoteSeek() })
 
     fun openPlayerSettings(page: PlayerSettingsPage = PlayerSettingsPage.MAIN) {
+        cancelRemoteSeek()
         playerSettingsPage = page
         playerSettingsVisible = true
         playerViewHandle?.hideController()
     }
 
     fun togglePlayPause() {
+        cancelRemoteSeek()
         if (player.isPlaying) {
             player.pause()
             showGestureFeedback("일시정지")
@@ -1277,17 +1288,32 @@ fun PlayerScreen(
         }
     }
 
-    fun seekByRemote(deltaMs: Long) {
-        val duration = player.duration
+    fun remoteSeekDuration(): Long = player.duration
             .takeIf { it > 0 && it != C.TIME_UNSET }
             ?: source.durationMs
-        val target = (player.currentPosition + deltaMs)
-            .coerceIn(0L, duration.coerceAtLeast(0L))
+
+    fun commitRemoteSeek() {
+        val target = remoteSeek.finish(remoteSeekDuration()) ?: return
         player.seekTo(target)
+        showGestureFeedback("이동 ${formatGestureTime(target)}")
+    }
+
+    fun seekByRemote(deltaMs: Long, deferred: Boolean = false) {
+        val target = remoteSeek.step(deltaMs, player.currentPosition, remoteSeekDuration()) ?: return
+        if (!deferred) commitRemoteSeek()
         showGestureFeedback(
-            if (deltaMs >= 0L) "10초 앞으로" else "10초 뒤로",
+            if (deferred) "이동 ${formatGestureTime(target)}"
+            else if (deltaMs >= 0L) "10초 앞으로" else "10초 뒤로",
         )
     }
+
+    LaunchedEffect(remoteSeek, remoteSeek.previewMs, remoteSeek.revision) {
+        if (remoteSeek.previewMs != null) {
+            delay(RemoteSeekIdleMs)
+            commitRemoteSeek()
+        }
+    }
+    DisposableEffect(remoteSeek) { onDispose { remoteSeek.cancel() } }
 
     fun configureEpisodeNavigation(playerView: PlayerView) {
         configureEpisodeNavigationButtons(
@@ -1295,10 +1321,12 @@ fun PlayerScreen(
             hasPrevious = hasPreviousPlayback,
             hasNext = hasNextPlayback,
             onPrevious = {
+                cancelRemoteSeek()
                 onPlayPrevious(player.currentPosition.coerceAtLeast(0))
                 showGestureFeedback("이전화")
             },
             onNext = {
+                cancelRemoteSeek()
                 onPlayNext(player.currentPosition.coerceAtLeast(0))
                 showGestureFeedback("다음화")
             },
@@ -1317,6 +1345,7 @@ fun PlayerScreen(
     }
 
     fun playNextFromRemote() {
+        cancelRemoteSeek()
         if (hasNextPlayback) {
             onPlayNext(player.currentPosition.coerceAtLeast(0))
             showGestureFeedback("다음화")
@@ -1331,6 +1360,38 @@ fun PlayerScreen(
         val isDown = nativeEvent.action == AndroidKeyEvent.ACTION_DOWN
         val isUp = nativeEvent.action == AndroidKeyEvent.ACTION_UP
         if (!isDown && !isUp) return false
+
+        val eventSignature = nativeEvent.eventTime * 1_000L +
+            nativeEvent.keyCode * 10L + nativeEvent.action
+        if (lastHandledRemoteEventSignature[0] == eventSignature) return true
+        if (isUp && nativeEvent.isCanceled) {
+            cancelRemoteSeek()
+            lastHandledRemoteEventSignature[0] = eventSignature
+            return true
+        }
+        val heldDirectionReleased = isUp && (
+            (nativeEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_LEFT && leftLongPressSeeking) ||
+                (nativeEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_RIGHT && rightLongPressSeeking)
+            )
+        val mediaSeekReleased = isUp && nativeEvent.keyCode in listOf(
+            AndroidKeyEvent.KEYCODE_MEDIA_REWIND, AndroidKeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
+            AndroidKeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD, AndroidKeyEvent.KEYCODE_MEDIA_SKIP_FORWARD,
+            AndroidKeyEvent.KEYCODE_MEDIA_STEP_BACKWARD, AndroidKeyEvent.KEYCODE_MEDIA_STEP_FORWARD,
+            AndroidKeyEvent.KEYCODE_BUTTON_L1, AndroidKeyEvent.KEYCODE_BUTTON_R1,
+            AndroidKeyEvent.KEYCODE_MEDIA_PREVIOUS, AndroidKeyEvent.KEYCODE_CHANNEL_DOWN,
+        )
+        if (heldDirectionReleased || mediaSeekReleased) {
+            commitRemoteSeek()
+            leftLongPressSeeking = false
+            rightLongPressSeeking = false
+            lastHandledRemoteEventSignature[0] = eventSignature
+            return true
+        }
+        // The native time bar already previews repeats and commits on scrub stop.
+        if (controllerVisible && nativeEvent.keyCode in listOf(
+                AndroidKeyEvent.KEYCODE_DPAD_LEFT, AndroidKeyEvent.KEYCODE_DPAD_RIGHT,
+            ) && playerViewHandle?.findViewById<View>(androidx.media3.ui.R.id.exo_progress)?.hasFocus() == true
+        ) return false
 
         val controllerNavigationKey = nativeEvent.keyCode in listOf(
             AndroidKeyEvent.KEYCODE_DPAD_CENTER,
@@ -1351,14 +1412,6 @@ fun PlayerScreen(
             nativeEvent.repeatCount == 0
         ) {
             return false
-        }
-
-        val eventSignature =
-            nativeEvent.eventTime * 1_000L +
-                nativeEvent.keyCode * 10L +
-                nativeEvent.action
-        if (lastHandledRemoteEventSignature[0] == eventSignature) {
-            return true
         }
 
         fun openSettingsFromRemote(page: PlayerSettingsPage = PlayerSettingsPage.MAIN) {
@@ -1406,6 +1459,7 @@ fun PlayerScreen(
 
             AndroidKeyEvent.KEYCODE_MEDIA_PLAY -> {
                 if (isDown && nativeEvent.repeatCount == 0) {
+                    cancelRemoteSeek()
                     player.play()
                     showGestureFeedback("재생")
                 }
@@ -1413,6 +1467,7 @@ fun PlayerScreen(
             }
             AndroidKeyEvent.KEYCODE_MEDIA_PAUSE -> {
                 if (isDown && nativeEvent.repeatCount == 0) {
+                    cancelRemoteSeek()
                     player.pause()
                     showGestureFeedback("일시정지")
                 }
@@ -1421,13 +1476,9 @@ fun PlayerScreen(
             AndroidKeyEvent.KEYCODE_DPAD_LEFT -> {
                 if (isDown && nativeEvent.repeatCount > 0) {
                     leftLongPressSeeking = true
-                    seekByRemote(-10_000L)
+                    seekByRemote(-10_000L, deferred = true)
                 } else if (isUp) {
-                    if (leftLongPressSeeking) {
-                        leftLongPressSeeking = false
-                    } else {
-                        seekByRemote(-10_000L)
-                    }
+                    seekByRemote(-10_000L)
                 }
                 true
             }
@@ -1437,7 +1488,7 @@ fun PlayerScreen(
             AndroidKeyEvent.KEYCODE_BUTTON_L1,
             -> {
                 if (isDown) {
-                    seekByRemote(-10_000L)
+                    seekByRemote(-10_000L, deferred = nativeEvent.repeatCount > 0)
                 }
                 true
             }
@@ -1445,10 +1496,11 @@ fun PlayerScreen(
             AndroidKeyEvent.KEYCODE_CHANNEL_DOWN,
             -> {
                 if (isDown && nativeEvent.repeatCount == 0 && hasPreviousPlayback) {
+                    cancelRemoteSeek()
                     onPlayPrevious(player.currentPosition.coerceAtLeast(0))
                     showGestureFeedback("이전화")
                 } else if (isDown) {
-                    seekByRemote(-10_000L)
+                    seekByRemote(-10_000L, deferred = nativeEvent.repeatCount > 0)
                 }
                 true
             }
@@ -1463,13 +1515,9 @@ fun PlayerScreen(
             AndroidKeyEvent.KEYCODE_DPAD_RIGHT -> {
                 if (isDown && nativeEvent.repeatCount > 0) {
                     rightLongPressSeeking = true
-                    seekByRemote(10_000L)
+                    seekByRemote(10_000L, deferred = true)
                 } else if (isUp) {
-                    if (rightLongPressSeeking) {
-                        rightLongPressSeeking = false
-                    } else {
-                        seekByRemote(10_000L)
-                    }
+                    seekByRemote(10_000L)
                 }
                 true
             }
@@ -1479,7 +1527,7 @@ fun PlayerScreen(
             AndroidKeyEvent.KEYCODE_BUTTON_R1,
             -> {
                 if (isDown) {
-                    seekByRemote(10_000L)
+                    seekByRemote(10_000L, deferred = nativeEvent.repeatCount > 0)
                 }
                 true
             }
@@ -1518,6 +1566,7 @@ fun PlayerScreen(
             }
             AndroidKeyEvent.KEYCODE_MEDIA_STOP -> {
                 if (isDown && nativeEvent.repeatCount == 0) {
+                    cancelRemoteSeek()
                     player.pause()
                     onProgress(
                         source,
@@ -1594,6 +1643,7 @@ fun PlayerScreen(
         if (playerSettingsVisible) {
             closeOrStepBackPlayerSettings()
         } else {
+            cancelRemoteSeek()
             player.pause()
             onProgress(source, player.currentPosition.coerceAtLeast(0), "paused")
             onClose()
@@ -1614,6 +1664,14 @@ fun PlayerScreen(
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         insetsController?.hide(WindowInsetsCompat.Type.systemBars())
         val fallbackListener = object : Player.Listener {
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int,
+            ) {
+                if (reason == Player.DISCONTINUITY_REASON_SEEK && remoteSeek.previewMs != null) cancelRemoteSeek()
+            }
+
             override fun onTracksChanged(tracks: Tracks) {
                 playerSubtitleText = ""
                 useNativeSubtitleRenderer = false
@@ -1635,11 +1693,15 @@ fun PlayerScreen(
             override fun onPlaybackStateChanged(playbackState: Int) {
                 when (playbackState) {
                     Player.STATE_READY -> playbackReconnectAttempts = 0
-                    Player.STATE_ENDED -> finishPlaybackAsWatched()
+                    Player.STATE_ENDED -> {
+                        cancelRemoteSeek()
+                        finishPlaybackAsWatched()
+                    }
                 }
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                cancelRemoteSeek()
                 val position = player.currentPosition.coerceAtLeast(0)
                 if (
                     error.isRetryableConnectionFailure() &&
@@ -1947,6 +2009,7 @@ fun PlayerScreen(
 
                 detectDragGestures(
                     onDragStart = { offset ->
+                        cancelRemoteSeek()
                         startX = offset.x
                         startY = offset.y
                         totalX = 0f
@@ -2163,6 +2226,12 @@ fun PlayerScreen(
                     applyVideoScreenSettings(this, videoScreenSettings)
                     keepScreenOn = true
                     this.player = player
+                    (findViewById<View>(androidx.media3.ui.R.id.exo_progress) as? TimeBar)
+                        ?.addListener(object : TimeBar.OnScrubListener {
+                            override fun onScrubStart(timeBar: TimeBar, position: Long) { latestCancelRemoteSeek() }
+                            override fun onScrubMove(timeBar: TimeBar, position: Long) = Unit
+                            override fun onScrubStop(timeBar: TimeBar, position: Long, canceled: Boolean) = Unit
+                        })
                     applySubtitleStyle(
                         this,
                         subtitleTypeface,
@@ -2244,6 +2313,7 @@ fun PlayerScreen(
                     playerViewHandle?.showController()
                 },
                 onClose = {
+                    cancelRemoteSeek()
                     player.pause()
                     onProgress(source, player.currentPosition.coerceAtLeast(0), "paused")
                     onClose()
