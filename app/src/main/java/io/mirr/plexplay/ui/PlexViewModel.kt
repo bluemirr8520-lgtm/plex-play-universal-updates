@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import io.mirr.plexplay.data.PlaybackSource
+import io.mirr.plexplay.data.BrowseLookupCache
 import io.mirr.plexplay.data.PlaybackQuality
 import io.mirr.plexplay.data.PlexConnection
 import io.mirr.plexplay.data.PlexException
@@ -20,6 +21,10 @@ import io.mirr.plexplay.data.validatedPlaybackNeighbor
 import io.mirr.plexplay.data.opensEpisodeList
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
@@ -106,6 +111,12 @@ class PlexViewModel(
     private var homeSearchJob: Job? = null
     private var relatedJob: Job? = null
     private var browseDetailsJob: Job? = null
+    private var homeEnrichmentJob: Job? = null
+    private var playbackStartJob: Job? = null
+    private var homeSnapshotLoaded = false
+    private var detailSelectionRevision = 0L
+    private val sectionCache = BrowseLookupCache<String, List<PlexItem>>(3, 60_000)
+    private val homeRowPermits = Semaphore(4)
     private var playingItem: PlexItem? = null
     private var playbackQueue: List<PlexItem> = emptyList()
     private var playbackQueueIndex: Int = -1
@@ -121,6 +132,9 @@ class PlexViewModel(
         username: String,
         password: String,
     ) {
+        showItemDetails(null)
+        homeSnapshotLoaded = false
+        sectionCache.clear()
         browseDetailsJob?.cancel()
         loadingJob?.cancel()
         loadingJob = viewModelScope.launch {
@@ -132,6 +146,7 @@ class PlexViewModel(
                 )
             }
                 .onSuccess { (connection, server) ->
+                    currentCoroutineContext().ensureActive()
                     repository.saveConnection(connection)
                     _state.update {
                         it.copy(
@@ -139,22 +154,32 @@ class PlexViewModel(
                             serverName = server.name,
                             serverVersion = server.version,
                             isSettingsVisible = false,
+                            homeRows = emptyList(),
+                            continueWatching = emptyList(),
+                            libraryContinueRows = emptyList(),
+                            libraryWatchedRows = emptyList(),
                         )
                     }
                     loadSectionsAndHome()
                 }
                 .onFailure(::showError)
-            _state.update { it.copy(isLoading = false) }
+            if (currentCoroutineContext()[Job]?.isActive == true) _state.update { it.copy(isLoading = false) }
         }
     }
 
     fun refresh() {
+        homeSnapshotLoaded = false
+        sectionCache.clear()
+        repository.clearBrowseCaches()
+        homeEnrichmentJob?.cancel()
+        showItemDetails(null)
         browseDetailsJob?.cancel()
         loadingJob?.cancel()
         loadingJob = viewModelScope.launch {
             _state.update { it.copy(isLoading = true, error = null) }
             try {
                 val server = repository.connect()
+                currentCoroutineContext().ensureActive()
                 _state.update {
                     it.copy(serverName = server.name, serverVersion = server.version)
                 }
@@ -162,13 +187,14 @@ class PlexViewModel(
             } catch (error: Throwable) {
                 showError(error)
             } finally {
-                _state.update { it.copy(isLoading = false) }
+                if (currentCoroutineContext()[Job]?.isActive == true) _state.update { it.copy(isLoading = false) }
             }
         }
     }
 
     private suspend fun loadSectionsAndHome() {
         val sections = applySavedOrder(repository.sections())
+        currentCoroutineContext().ensureActive()
         loadHomeInternal(sections)
     }
 
@@ -183,51 +209,13 @@ class PlexViewModel(
     private suspend fun loadHomeInternal(sections: List<PlexSection>) =
         supervisorScope {
             homeSearchJob?.cancel()
-            val continueDeferred = async {
-                runCatching { repository.onDeck() }.getOrDefault(emptyList())
-            }
-            val rowDeferred = sections.map { section ->
-                async {
-                    val watchedRow = HomeLibraryRow(
-                        section = section,
-                        items = runCatching {
-                            repository.watched(section)
-                        }.getOrDefault(emptyList()),
-                    )
-                    val continueRow = HomeLibraryRow(
-                        section = section,
-                        items = runCatching {
-                            repository.sectionOnDeck(section.key)
-                        }.getOrDefault(emptyList()),
-                    )
-                    val recentRow = HomeLibraryRow(
-                        section = section,
-                        items = runCatching {
-                            repository.recentlyAdded(section)
-                        }.getOrDefault(emptyList()),
-                    )
-                    Triple(watchedRow, continueRow, recentRow)
-                }
-            }
-            val continueItems = continueDeferred.await()
-            val loadedRows = rowDeferred.awaitAll()
-            val libraryWatchedRows = loadedRows
-                .map { it.first }
-                .filter { it.items.isNotEmpty() }
-            val libraryContinueRows = loadedRows
-                .map { it.second }
-                .filter { it.items.isNotEmpty() }
-            val rows = loadedRows
-                .map { it.third }
-                .filter { it.items.isNotEmpty() }
+            homeEnrichmentJob?.cancel()
+            val connection = repository.connection()
             history.clear()
             _state.update {
                 it.copy(
                     sections = sections,
-                    continueWatching = continueItems,
-                    libraryWatchedRows = libraryWatchedRows,
-                    libraryContinueRows = libraryContinueRows,
-                    homeRows = rows,
+                    homeRows = it.homeRows.filter { row -> sections.any { section -> section.key == row.section.key } },
                     homeSearchResults = emptyList(),
                     isHomeSearchLoading = false,
                     isHome = true,
@@ -241,11 +229,70 @@ class PlexViewModel(
                     canNavigateBack = false,
                 )
             }
+            val continueDeferred = async {
+                val items = optionalRequest { repository.onDeck() }
+                currentCoroutineContext().ensureActive()
+                if (repository.connection() == connection && items != null) _state.update {
+                    it.copy(continueWatching = items, isLoading = false)
+                }
+                if (items != null && repository.connection() == connection) homeSnapshotLoaded = true
+            }
+            // The home screen does not display watched rows or per-library
+            // On Deck rows. Fetch those only for the library the user opens.
+            sections.map { section ->
+                async {
+                    val items = homeRowPermits.withPermit { optionalRequest { repository.recentlyAdded(section) } }
+                    currentCoroutineContext().ensureActive()
+                    if (repository.connection() == connection && items != null) _state.update {
+                        it.copy(homeRows = replaceHomeRow(it.homeRows, section, items), isLoading = false)
+                    }
+                    if (items != null && repository.connection() == connection) homeSnapshotLoaded = true
+                }
+            }.awaitAll()
+            currentCoroutineContext().ensureActive()
+            if (repository.connection() == connection) enrichRecentSeries()
+            continueDeferred.await()
+            currentCoroutineContext().ensureActive()
+            if (repository.connection() == connection) {
+                homeSnapshotLoaded = true
+            }
         }
 
+    private fun enrichRecentSeries() {
+        homeEnrichmentJob?.cancel()
+        if (!_state.value.isHome || _state.value.selectedItem != null || _state.value.playback != null) return
+        val connection = repository.connection()
+        val rows = _state.value.homeRows
+        homeEnrichmentJob = viewModelScope.launch {
+            supervisorScope {
+                rows.flatMap { row -> row.items.filter { it.type == "show" }.map { row.section to it } }
+                    .map { (section, show) -> async {
+                        val label = optionalRequest { repository.latestEpisodeLabel(show) } ?: return@async
+                        currentCoroutineContext().ensureActive()
+                        if (repository.connection() == connection) _state.update { current ->
+                            current.copy(homeRows = current.homeRows.map { row ->
+                                if (row.section.key != section.key) row else row.copy(items = row.items.map {
+                                    if (it.ratingKey == show.ratingKey) it.copy(latestEpisodeLabel = label) else it
+                                })
+                            })
+                        }
+                    } }.awaitAll()
+            }
+        }
+    }
+
     fun selectHome() {
+        showItemDetails(null)
         browseDetailsJob?.cancel()
         loadingJob?.cancel()
+        if (homeSnapshotLoaded) {
+            history.clear()
+            _state.update { it.copy(isHome = true, selectedSection = null, browsingItem = null,
+                title = "홈", items = emptyList(), query = "", canNavigateBack = false,
+                isLoading = false, error = null) }
+            enrichRecentSeries()
+            return
+        }
         loadingJob = viewModelScope.launch {
             _state.update { it.copy(isLoading = true, error = null) }
             try {
@@ -256,14 +303,18 @@ class PlexViewModel(
             } catch (error: Throwable) {
                 showError(error)
             } finally {
-                _state.update { it.copy(isLoading = false) }
+                if (currentCoroutineContext()[Job]?.isActive == true) _state.update { it.copy(isLoading = false) }
             }
         }
     }
 
     fun selectSection(section: PlexSection) {
+        showItemDetails(null)
+        homeEnrichmentJob?.cancel()
         browseDetailsJob?.cancel()
         loadingJob?.cancel()
+        _state.update { it.copy(selectedSection = section, browsingItem = null, isHome = false,
+            title = section.title, items = emptyList(), query = "", canNavigateBack = false) }
         loadingJob = viewModelScope.launch {
             _state.update { it.copy(isLoading = true, error = null, selectedItem = null) }
             try {
@@ -272,20 +323,20 @@ class PlexViewModel(
             } catch (error: Throwable) {
                 showError(error)
             } finally {
-                _state.update { it.copy(isLoading = false) }
+                if (currentCoroutineContext()[Job]?.isActive == true) _state.update { it.copy(isLoading = false) }
             }
         }
     }
 
-    private suspend fun loadSectionInternal(section: PlexSection) {
-        val items = repository.sectionItems(section.key).sortedByKoreanTitle()
-        val continueItems = try {
-            repository.sectionOnDeck(section.key)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Exception) {
-            null
-        }
+    private suspend fun loadSectionInternal(section: PlexSection) = supervisorScope {
+        val connection = repository.connection()
+        val continueDeferred = async { optionalRequest { repository.sectionOnDeck(section.key) } }
+        val items = sectionCache.get(connection, section.key)
+            ?: repository.sectionItems(section.key).let { items -> withContext(Dispatchers.Default) { items.sortedByKoreanTitle() } }.also {
+                if (it.size <= 10_000 && repository.connection() == connection) sectionCache.put(connection, section.key, it)
+            }
+        currentCoroutineContext().ensureActive()
+        if (repository.connection() != connection) return@supervisorScope
         _state.update {
             it.copy(
                 selectedSection = section,
@@ -295,6 +346,13 @@ class PlexViewModel(
                 items = items,
                 query = "",
                 canNavigateBack = false,
+                isLoading = false,
+            )
+        }
+        val continueItems = continueDeferred.await()
+        currentCoroutineContext().ensureActive()
+        if (repository.connection() == connection) _state.update {
+            it.copy(
                 libraryContinueRows = continueItems?.let { rows ->
                     replaceHomeRow(it.libraryContinueRows, section, rows)
                 } ?: it.libraryContinueRows,
@@ -308,11 +366,14 @@ class PlexViewModel(
             browse(item)
         } else {
             showItemDetails(item)
+            if (item == null && homeSnapshotLoaded) enrichRecentSeries()
         }
     }
 
     private fun showItemDetails(item: PlexItem?) {
+        val revision = ++detailSelectionRevision
         relatedJob?.cancel()
+        homeEnrichmentJob?.cancel()
         if (item == null) {
             _state.update {
                 it.copy(
@@ -335,6 +396,7 @@ class PlexViewModel(
             )
         }
         relatedJob = viewModelScope.launch {
+            val connection = repository.connection()
             val detailedItem = try {
                 repository.itemDetails(item)
             } catch (error: CancellationException) {
@@ -349,6 +411,8 @@ class PlexViewModel(
                     item.leafCount > 0
             val canBrowse = if (detailedItem.isPlayable) {
                 false
+            } else if (hasKnownChildren) {
+                true
             } else {
                 try {
                     repository.hasChildren(detailedItem)
@@ -359,7 +423,8 @@ class PlexViewModel(
                 }
             }
             _state.update { current ->
-                if (current.selectedItem?.ratingKey != item.ratingKey) {
+                if (detailSelectionRevision != revision || repository.connection() != connection ||
+                    current.selectedItem?.ratingKey != item.ratingKey) {
                     current
                 } else {
                     current.copy(
@@ -369,14 +434,23 @@ class PlexViewModel(
                 }
             }
             val related = try {
-                repository.relatedContent(detailedItem)
+                repository.relatedContent(detailedItem) { partial ->
+                    _state.update { current ->
+                        if (detailSelectionRevision != revision || repository.connection() != connection ||
+                            current.selectedItem?.ratingKey != item.ratingKey) current else current.copy(
+                                relatedActorWorks = partial.actorWorks,
+                                relatedGenreWorks = partial.similarGenreWorks,
+                            )
+                    }
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Throwable) {
                 null
             }
             _state.update { current ->
-                if (current.selectedItem?.ratingKey != item.ratingKey) {
+                if (detailSelectionRevision != revision || repository.connection() != connection ||
+                    current.selectedItem?.ratingKey != item.ratingKey) {
                     current
                 } else {
                     current.copy(
@@ -463,6 +537,12 @@ class PlexViewModel(
     }
 
     fun navigateBack(): Boolean {
+        if (playbackStartJob?.isActive == true && _state.value.playback == null) {
+            playbackStartJob?.cancel()
+            clearPlaybackQueue()
+            _state.update { it.copy(isLoading = false) }
+            return true
+        }
         if (_state.value.isCollectionSettingsVisible) {
             if (!_state.value.isLoading) showCollectionSettings(false)
             return true
@@ -523,32 +603,42 @@ class PlexViewModel(
     }
 
     fun play(item: PlexItem) {
+        val targetItem = _state.value.selectedItem?.takeIf { it.ratingKey == item.ratingKey } ?: item
+        // Playback has priority over optional metadata/related/home requests.
+        showItemDetails(null)
+        loadingJob?.cancel()
+        browseDetailsJob?.cancel()
+        homeSearchJob?.cancel()
+        playbackStartJob?.cancel()
         playbackQueueJob?.cancel()
-        viewModelScope.launch {
+        playbackStartJob = viewModelScope.launch {
             _state.update { it.copy(isLoading = true, error = null) }
             try {
                 val cachedState = _state.value
                 val fullList = playbackCandidateLists(cachedState).firstOrNull { list ->
                     list.any { it.ratingKey == item.ratingKey }
                 }.orEmpty()
-                val queue = sameFolderPlaybackQueue(item, fullList)
+                val queue = sameFolderPlaybackQueue(targetItem, fullList)
                 playbackQueue = queue
                 playbackQueueIndex = queue.indexOfFirst {
                     it.ratingKey == item.ratingKey
                 }.takeIf { it >= 0 } ?: 0
-                val target = playbackQueue.getOrNull(playbackQueueIndex) ?: item
+                val target = playbackQueue.getOrNull(playbackQueueIndex) ?: targetItem
                 openPlayback(target)
                 _state.value.playback?.let { refreshPlaybackQueue(it, cachedState) }
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 clearPlaybackQueue()
                 showError(error)
             } finally {
-                _state.update { it.copy(isLoading = false) }
+                if (currentCoroutineContext()[Job]?.isActive == true) _state.update { it.copy(isLoading = false) }
             }
         }
     }
 
     fun reportProgress(source: PlaybackSource, positionMs: Long, state: String) {
+        if (state in setOf("paused", "stopped")) sectionCache.clear()
         val section = _state.value.sections.firstOrNull { it.key == playingItem?.librarySectionId }
             ?: _state.value.selectedSection
         val connection = repository.connection()
@@ -573,6 +663,7 @@ class PlexViewModel(
 
 
     fun closePlayer() {
+        playbackStartJob?.cancel()
         clearPlaybackQueue()
         _state.update {
             it.copy(
@@ -581,6 +672,7 @@ class PlexViewModel(
                 previousPlaybackTitle = null,
                 hasNextPlayback = false,
                 nextPlaybackTitle = null,
+                isLoading = false,
             )
         }
     }
@@ -590,6 +682,8 @@ class PlexViewModel(
         if (!matchesPlaybackCompletion(source, completedSource) ||
             completingPlaybackId == source.playbackId
         ) return
+        sectionCache.clear()
+        repository.clearBrowseCaches()
         completingPlaybackId = source.playbackId
         val currentState = _state.value
         val returnToHome = currentState.isHome
@@ -832,6 +926,10 @@ class PlexViewModel(
         action: suspend () -> WatchedActionResult,
     ) {
         if (_state.value.isLoading) return
+        sectionCache.clear()
+        repository.clearBrowseCaches()
+        loadingJob?.cancel()
+        homeEnrichmentJob?.cancel()
         relatedJob?.cancel()
         browseDetailsJob?.cancel()
         viewModelScope.launch {
@@ -1037,6 +1135,13 @@ class PlexViewModel(
     }
 
     fun logout() {
+        loadingJob?.cancel()
+        homeSearchJob?.cancel()
+        homeEnrichmentJob?.cancel()
+        playbackStartJob?.cancel()
+        showItemDetails(null)
+        homeSnapshotLoaded = false
+        sectionCache.clear()
         browseDetailsJob?.cancel()
         playbackQueueJob?.cancel()
         playingItem = null
@@ -1133,6 +1238,7 @@ class PlexViewModel(
         val source = repository.playback(item).let {
             if (resetResume) it.copy(resumePositionMs = 0) else it
         }
+        currentCoroutineContext().ensureActive()
         if (requiredFolder != null && playbackFolderKey(source.filePath) != requiredFolder) {
             throw PlexException("영상의 폴더가 변경되었거나 확인되지 않아 다음 재생을 중지했습니다.")
         }
@@ -1226,6 +1332,14 @@ class PlexViewModel(
                 isLoading = false,
             )
         }
+    }
+
+    private suspend fun <T> optionalRequest(request: suspend () -> T): T? = try {
+        request()
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        null
     }
 
     private fun replaceHomeRow(

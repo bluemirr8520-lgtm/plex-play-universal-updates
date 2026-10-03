@@ -2,17 +2,32 @@ package io.mirr.plexplay.data
 
 import io.mirr.plexplay.BuildConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
 import java.io.InputStream
-import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URLEncoder
+import java.io.IOException
+import java.util.concurrent.TimeUnit
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Dispatcher
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.RequestBody.Companion.toRequestBody
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 class PlexApi(
     private val connection: PlexConnection,
     private val clientIdentifier: String,
+    private val backgroundLookup: Boolean = false,
 ) {
     suspend fun server(): PlexServer = request("/") { PlexXmlParser.server(it) }
 
@@ -71,6 +86,24 @@ class PlexApi(
                 "X-Plex-Container-Size" to "30",
             ),
         ) { PlexXmlParser.items(it) }
+
+    /** Latest added episode, not the highest episode number or the next unwatched one. */
+    suspend fun latestEpisode(show: PlexItem): PlexItem? {
+        if (show.type != "show" || !show.ratingKey.matches(Regex("[0-9]+"))) return null
+        return request(
+            path = "/library/metadata/${show.ratingKey}/allLeaves",
+            query = mapOf(
+                "sort" to "addedAt:desc",
+                "includeMedia" to "0",
+                "X-Plex-Container-Start" to "0",
+                "X-Plex-Container-Size" to "1",
+            ),
+        ) { PlexXmlParser.items(it) }.firstOrNull {
+            it.type == "episode" && it.grandparentRatingKey == show.ratingKey &&
+                (it.librarySectionId == null || show.librarySectionId == null ||
+                    it.librarySectionId == show.librarySectionId)
+        }
+    }
 
     suspend fun search(term: String): List<PlexItem> =
         request(
@@ -261,7 +294,8 @@ class PlexApi(
             query = mapOf(
                 filterName to filterValue,
                 "sort" to "titleSort:asc",
-                "includeMedia" to "1",
+                // Related cards fetch fresh Part/Stream metadata only when played.
+                "includeMedia" to "0",
                 "X-Plex-Container-Start" to "0",
                 "X-Plex-Container-Size" to limit.toString(),
             ),
@@ -312,45 +346,63 @@ class PlexApi(
         var lastError: Exception? = null
         // A PUT may have succeeded even if its response was lost. Never replay
         // metadata changes automatically; let the caller report partial success.
-        val attempts = if (method == "GET") 2 else 1
+        val attempts = if (method == "GET" && !backgroundLookup) 2 else 1
         for (attempt in 0 until attempts) {
-            val http = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 10_000
-                readTimeout = 30_000
-                requestMethod = method
-                useCaches = false
-                setRequestProperty("Accept", "application/xml")
-                setRequestProperty("Accept-Encoding", "identity")
-                setRequestProperty("Connection", "close")
-                setRequestProperty("X-Plex-Token", this@PlexApi.connection.token)
-                setRequestProperty("X-Plex-Product", "Plex Play Universal")
-                setRequestProperty("X-Plex-Version", BuildConfig.VERSION_NAME)
-                setRequestProperty("X-Plex-Platform", "Android")
-                setRequestProperty("X-Plex-Client-Identifier", clientIdentifier)
-            }
+            currentCoroutineContext().ensureActive()
+            val request = Request.Builder().url(url)
+                .method(method, if (method == "GET") null else ByteArray(0).toRequestBody())
+                .header("Accept", "application/xml")
+                .header("Accept-Encoding", "identity")
+                .header("Connection", "close")
+                .header("X-Plex-Token", connection.token)
+                .header("X-Plex-Product", "Plex Play Universal")
+                .header("X-Plex-Version", BuildConfig.VERSION_NAME)
+                .header("X-Plex-Platform", "Android")
+                .header("X-Plex-Client-Identifier", clientIdentifier)
+                .build()
+            val call = (if (backgroundLookup) backgroundClient else metadataClient).newCall(request)
             try {
-                val status = http.responseCode
-                if (status !in 200..299) {
-                    val message = when (status) {
-                        401 -> "Plex 계정 인증에 실패했습니다."
-                        403 -> forbiddenMessage ?: "Plex 서버 접근 권한이 없습니다."
-                        404 -> "요청한 Plex 콘텐츠를 찾지 못했습니다."
-                        else -> "Plex 서버 응답 오류 ($status)"
-                    }
-                    throw PlexException(
-                        message,
-                        collectionPermissionDenied = collectionEdit &&
-                            connection.isServerOwner != true && status in setOf(401, 403),
-                    )
+                return@withContext suspendCancellableCoroutine<T> { continuation ->
+                    // cancel() closes the socket without taking a blocking
+                    // HttpURLConnection read lock on the UI/cancellation thread.
+                    continuation.invokeOnCancellation { call.cancel() }
+                    call.enqueue(object : Callback {
+                        override fun onFailure(call: Call, error: IOException) {
+                            if (continuation.isActive) continuation.resumeWithException(error)
+                        }
+                        override fun onResponse(call: Call, response: Response) {
+                            try {
+                                val result = response.use {
+                                    if (!continuation.isActive) return
+                                    val status = it.code
+                                    if (status !in 200..299) {
+                                        val message = when (status) {
+                                            401 -> "Plex 계정 인증에 실패했습니다."
+                                            403 -> forbiddenMessage ?: "Plex 서버 접근 권한이 없습니다."
+                                            404 -> "요청한 Plex 콘텐츠를 찾지 못했습니다."
+                                            else -> "Plex 서버 응답 오류 ($status)"
+                                        }
+                                        throw PlexException(message,
+                                            collectionPermissionDenied = collectionEdit &&
+                                                connection.isServerOwner != true && status in setOf(401, 403))
+                                    }
+                                    val body = it.body ?: throw IOException("Empty metadata response")
+                                    BufferedInputStream(body.byteStream()).use(parse)
+                                }
+                                if (continuation.isActive) continuation.resume(result)
+                            } catch (error: Exception) {
+                                if (continuation.isActive) continuation.resumeWithException(error)
+                            }
+                        }
+                    })
                 }
-                return@withContext BufferedInputStream(http.inputStream).use(parse)
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: PlexException) {
                 throw error
             } catch (error: Exception) {
                 lastError = error
                 if (attempt == attempts - 1) break
-            } finally {
-                http.disconnect()
             }
         }
         throw PlexException(
@@ -363,4 +415,16 @@ class PlexApi(
     private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())
     private fun quoteCollectionTag(value: String): String =
         encode(value).replace("+", "%20").replace("%7E", "~").replace("*", "%2A").replace("%2F", "/")
+
+    companion object {
+        private val metadataClient = OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(false).build()
+        // A separate queue ensures optional discovery never occupies playback
+        // metadata's per-host dispatch slots. Existing GET/PUT retry policy stays above.
+        private val backgroundClient = metadataClient.newBuilder()
+            .dispatcher(Dispatcher().apply { maxRequests = 8; maxRequestsPerHost = 4 })
+            .connectTimeout(4, TimeUnit.SECONDS).readTimeout(6, TimeUnit.SECONDS)
+            .callTimeout(6, TimeUnit.SECONDS).build()
+    }
 }

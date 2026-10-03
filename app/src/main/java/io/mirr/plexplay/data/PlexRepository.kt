@@ -4,10 +4,10 @@ import io.mirr.plexplay.BuildConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.async
-import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.net.URLEncoder
 import java.util.UUID
 
@@ -15,12 +15,28 @@ class PlexRepository(
     private val store: ConnectionStore,
 ) {
     private val collectionUpdateMutex = Mutex()
+    private val relatedPermits = Semaphore(3)
+    private val latestEpisodePermits = Semaphore(3)
+    private val relatedCache = BrowseLookupCache<String, PlexRelatedContent>(48, 90_000)
+    private data class LatestLabel(val text: String?)
+    private val latestEpisodeCache = BrowseLookupCache<String, LatestLabel>(100, 60_000)
 
     fun connection(): PlexConnection = store.load()
 
-    fun saveConnection(connection: PlexConnection) = store.save(connection)
+    fun saveConnection(connection: PlexConnection) {
+        clearBrowseCaches()
+        store.save(connection)
+    }
 
-    fun logout() = store.logout()
+    fun logout() {
+        clearBrowseCaches()
+        store.logout()
+    }
+
+    fun clearBrowseCaches() {
+        relatedCache.clear()
+        latestEpisodeCache.clear()
+    }
 
     fun libraryOrder(): List<String> = store.libraryOrder()
 
@@ -83,7 +99,19 @@ class PlexRepository(
         api().sectionItems(sectionKey)
 
     suspend fun recentlyAdded(section: PlexSection): List<PlexItem> =
-        api().recentlyAdded(section.key, section.type)
+        api(backgroundLookup = true).recentlyAdded(section.key, section.type)
+
+    suspend fun latestEpisodeLabel(show: PlexItem): String? {
+        if (show.type != "show") return null
+        val connection = store.load()
+        latestEpisodeCache.get(connection, show.ratingKey)?.let { return it.text }
+        val episode = latestEpisodePermits.withPermit {
+            api(connection, backgroundLookup = true).latestEpisode(show)
+        }
+        val label = episode?.let(::formatLatestEpisodeLabel)
+        if (store.load() == connection) latestEpisodeCache.put(connection, show.ratingKey, LatestLabel(label))
+        return label
+    }
 
     suspend fun onDeck(): List<PlexItem> = api().onDeck()
 
@@ -114,14 +142,21 @@ class PlexRepository(
     suspend fun itemDetails(item: PlexItem): PlexItem =
         api().metadata(item.ratingKey).firstOrNull() ?: item
 
-    suspend fun relatedContent(item: PlexItem): PlexRelatedContent {
-        val resolved = api().metadata(item.ratingKey).firstOrNull() ?: item
+    suspend fun relatedContent(
+        item: PlexItem,
+        onUpdate: (PlexRelatedContent) -> Unit = {},
+    ): PlexRelatedContent {
+        val connection = store.load()
+        relatedCache.get(connection, item.ratingKey)?.let { onUpdate(it); return it }
+        // showItemDetails already resolved this metadata. Do not fetch it twice.
+        val resolved = item
+        val api = api(connection, backgroundLookup = true)
         val taggedItem = if (
             resolved.actors.isEmpty() &&
             resolved.genres.isEmpty() &&
             !resolved.grandparentRatingKey.isNullOrBlank()
         ) {
-            api().metadata(resolved.grandparentRatingKey).firstOrNull() ?: resolved
+            api.metadata(resolved.grandparentRatingKey).firstOrNull() ?: resolved
         } else {
             resolved
         }
@@ -129,45 +164,13 @@ class PlexRepository(
             ?: resolved.librarySectionId
             ?: item.librarySectionId
             ?: return PlexRelatedContent()
-        val actorFilters = taggedItem.actors.mapNotNull { it.queryFilter("actor") }
-            .distinct()
-            .take(3)
-        val genreFilters = taggedItem.genres.mapNotNull { it.queryFilter("genre") }
-            .distinct()
-            .take(3)
-
-        return supervisorScope {
-            val actorWorks = actorFilters.map { filter ->
-                async {
-                    try {
-                        api().filteredSectionItems(sectionKey, filter)
-                    } catch (error: CancellationException) {
-                        throw error
-                    } catch (_: Throwable) {
-                        emptyList()
-                    }
-                }
-            }
-            val genreWorks = genreFilters.map { filter ->
-                async {
-                    try {
-                        api().filteredSectionItems(sectionKey, filter)
-                    } catch (error: CancellationException) {
-                        throw error
-                    } catch (_: Throwable) {
-                        emptyList()
-                    }
-                }
-            }
-            PlexRelatedContent(
-                actorWorks = actorWorks.map { it.await() }
-                    .flatten()
-                    .relatedCandidatesExcluding(item, taggedItem),
-                similarGenreWorks = genreWorks.map { it.await() }
-                    .flatten()
-                    .relatedCandidatesExcluding(item, taggedItem),
-            )
-        }
+        val related = loadRelatedContent(item, taggedItem, relatedPermits,
+            fetch = { filter -> api.filteredSectionItems(sectionKey, filter, limit = 24) },
+            onUpdate = { if (store.load() == connection) onUpdate(it) })
+        if (store.load() == connection &&
+            (related.actorWorks.isNotEmpty() || related.similarGenreWorks.isNotEmpty())
+        ) relatedCache.put(connection, item.ratingKey, related)
+        return related
     }
 
     suspend fun watched(section: PlexSection): List<PlexItem> =
@@ -420,25 +423,6 @@ class PlexRepository(
 
     fun token(): String = store.load().token
 
-    private fun PlexTag.queryFilter(defaultName: String): String? {
-        val raw = filter?.takeIf { it.contains('=') }
-        if (raw != null) return raw
-        return id?.takeIf { it.isNotBlank() }?.let { "$defaultName=$it" }
-    }
-
-    private fun List<PlexItem>.relatedCandidatesExcluding(
-        selected: PlexItem,
-        taggedItem: PlexItem,
-    ): List<PlexItem> = asSequence()
-        .filter { it.type in setOf("movie", "show") }
-        .filter { candidate ->
-            candidate.ratingKey != selected.ratingKey &&
-                candidate.ratingKey != taggedItem.ratingKey
-        }
-        .distinctBy { "${it.type}-${it.ratingKey}" }
-        .take(20)
-        .toList()
-
     private fun transcodeUrl(
         connection: PlexConnection,
         ratingKey: String,
@@ -568,8 +552,8 @@ class PlexRepository(
         return matching.ifEmpty { this }
     }
 
-    private fun api(connection: PlexConnection = store.load()): PlexApi {
+    private fun api(connection: PlexConnection = store.load(), backgroundLookup: Boolean = false): PlexApi {
         if (!connection.isConfigured) throw PlexException("Plex 연결 정보가 없습니다.")
-        return PlexApi(connection, store.clientIdentifier())
+        return PlexApi(connection, store.clientIdentifier(), backgroundLookup)
     }
 }

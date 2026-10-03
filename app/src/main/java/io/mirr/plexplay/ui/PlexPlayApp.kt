@@ -608,7 +608,7 @@ private fun LibraryScreen(
                 } else {
                     emptyList()
                 }
-                val libraryItems = state.filteredItems
+                val libraryItems = remember(state.items, state.query) { state.filteredItems }
 
                 if (
                     libraryItems.isEmpty() &&
@@ -1677,6 +1677,7 @@ private fun HomeMediaRow(
                         imageUrl = imageUrl(item.thumb),
                         token = token,
                         modifier = Modifier.width(cardWidth),
+                        latestEpisodeLine = item.type == "show",
                         onClick = { onSelectItem(item) },
                     )
                 }
@@ -1691,6 +1692,7 @@ private fun MediaCard(
     imageUrl: String?,
     token: String,
     modifier: Modifier = Modifier,
+    latestEpisodeLine: Boolean = false,
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -1822,12 +1824,14 @@ private fun MediaCard(
             overflow = TextOverflow.Ellipsis,
         )
         Text(
-            text = item.subtitle
+            text = item.latestEpisodeLabel ?: item.subtitle
                 ?: item.year?.toString()
                 ?: childLabel(item),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 12.sp,
-            maxLines = 1,
+            // Reserve space before enrichment so remote focus/rows do not jump.
+            minLines = if (latestEpisodeLine) 2 else 1,
+            maxLines = if (latestEpisodeLine) 2 else 1,
             overflow = TextOverflow.Ellipsis,
         )
     }

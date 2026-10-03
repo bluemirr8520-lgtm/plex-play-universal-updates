@@ -238,6 +238,8 @@ internal object PlexXmlParser {
         val leafCount: Int,
         val viewedLeafCount: Int,
         val childCount: Int,
+        val episodeNumber: Int?,
+        val seasonNumber: Int?,
         var partKey: String? = null,
         var filePath: String? = null,
         var selectedMediaIndex: Int = 0,
@@ -337,6 +339,8 @@ internal object PlexXmlParser {
             viewedLeafCount = viewedLeafCount,
             childCount = childCount,
             mediaFilePaths = mediaFilePaths.toList(),
+            episodeNumber = episodeNumber,
+            seasonNumber = seasonNumber,
         )
 
         companion object {
@@ -377,6 +381,8 @@ internal object PlexXmlParser {
                     viewedLeafCount =
                         parser.attr("viewedLeafCount")?.toIntOrNull() ?: 0,
                     childCount = parser.attr("childCount")?.toIntOrNull() ?: 0,
+                    episodeNumber = parser.attr("index")?.toIntOrNull(),
+                    seasonNumber = parser.attr("parentIndex")?.toIntOrNull(),
                 )
             }
         }

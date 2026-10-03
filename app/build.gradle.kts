@@ -23,8 +23,8 @@ android {
         applicationId = "io.mirr.plexplay.universal"
         minSdk = 26
         targetSdk = 36
-        versionCode = 40
-        versionName = "1.0.39"
+        versionCode = 41
+        versionName = "1.0.40"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -121,6 +121,8 @@ dependencies {
 
     implementation("io.coil-kt.coil3:coil-compose:3.5.0")
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.5.0")
+    // Already used by Coil; pin the cancellable metadata transport explicitly.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("net.sf.kxml:kxml2:2.3.0")

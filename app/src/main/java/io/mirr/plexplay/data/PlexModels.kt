@@ -72,6 +72,10 @@ data class PlexItem(
     // All original Part.file values, including blanks for unresolved versions.
     // filePath remains the selected playback Part.
     val mediaFilePaths: List<String> = emptyList(),
+    val episodeNumber: Int? = null,
+    val seasonNumber: Int? = null,
+    // Home-only enrichment; never changes the series' playback/browse identity.
+    val latestEpisodeLabel: String? = null,
 ) {
     val isPlayable: Boolean
         get() = type in setOf("movie", "episode", "clip", "video", "track") || partKey != null
