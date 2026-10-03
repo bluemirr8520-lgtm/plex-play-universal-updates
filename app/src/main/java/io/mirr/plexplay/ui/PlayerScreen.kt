@@ -683,7 +683,6 @@ fun PlayerScreen(
     var playerSettingsVisible by remember { mutableStateOf(false) }
     var playerViewHandle by remember { mutableStateOf<PlayerView?>(null) }
     val playerFocusRequester = remember { FocusRequester() }
-    val playerSettingsFocusRequester = remember { FocusRequester() }
     var playerSettingsPage by remember {
         mutableStateOf(PlayerSettingsPage.MAIN)
     }
@@ -1596,33 +1595,6 @@ fun PlayerScreen(
         }
     }
 
-    fun handlePlayerSettingsKeyEvent(nativeEvent: AndroidKeyEvent): Boolean {
-        val keyHandledByDialog = when (nativeEvent.keyCode) {
-            AndroidKeyEvent.KEYCODE_BACK,
-            AndroidKeyEvent.KEYCODE_ESCAPE,
-            AndroidKeyEvent.KEYCODE_MENU,
-            AndroidKeyEvent.KEYCODE_SETTINGS,
-            AndroidKeyEvent.KEYCODE_MEDIA_PLAY,
-            AndroidKeyEvent.KEYCODE_MEDIA_PAUSE,
-            AndroidKeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-            -> true
-            else -> false
-        }
-        if (!keyHandledByDialog) return false
-        if (
-            nativeEvent.action == AndroidKeyEvent.ACTION_DOWN &&
-            nativeEvent.repeatCount == 0 &&
-            nativeEvent.keyCode !in listOf(
-                AndroidKeyEvent.KEYCODE_MEDIA_PLAY,
-                AndroidKeyEvent.KEYCODE_MEDIA_PAUSE,
-                AndroidKeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-            )
-        ) {
-            closeOrStepBackPlayerSettings()
-        }
-        return true
-    }
-
     LaunchedEffect(gestureFeedbackRevision) {
         if (gestureFeedbackRevision == 0) return@LaunchedEffect
         delay(900)
@@ -1634,8 +1606,6 @@ fun PlayerScreen(
             playerFocusRequester.requestFocus()
         } else {
             playerViewHandle?.hideController()
-            delay(80)
-            runCatching { playerSettingsFocusRequester.requestFocus() }
         }
     }
 
@@ -1933,7 +1903,7 @@ fun PlayerScreen(
         Modifier
             .fillMaxSize()
             .focusRequester(playerFocusRequester)
-            .focusable()
+            .focusable(enabled = !playerSettingsVisible)
             .onPreviewKeyEvent { event ->
                 handlePlayerRemoteKey(event.nativeKeyEvent)
             }
@@ -2345,12 +2315,7 @@ fun PlayerScreen(
             playerSettingsPage == PlayerSettingsPage.DISPLAY ||
                 playerSettingsPage == PlayerSettingsPage.DISPLAY_ADVANCED
         PlaybackSettingsPanel(
-            modifier = Modifier
-                .focusRequester(playerSettingsFocusRequester)
-                .onPreviewKeyEvent {
-                    handlePlayerSettingsKeyEvent(it.nativeKeyEvent)
-                }
-                .focusable(),
+            focusKey = playerSettingsPage,
             onDismissRequest = ::closeOrStepBackPlayerSettings,
             previewVideo = picturePreviewVisible,
             containerColor = if (picturePreviewVisible) {

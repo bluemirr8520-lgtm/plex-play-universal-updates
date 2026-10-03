@@ -1889,8 +1889,8 @@ fun VlcPlayerScreen(
                 }
             }
             .focusRequester(controlsFocusRequester)
-            .focusable()
-            .clickable { controlsVisible = !controlsVisible },
+            .focusable(enabled = !settingsVisible)
+            .clickable(enabled = !settingsVisible) { controlsVisible = !controlsVisible },
     ) {
         AndroidView(
             factory = { ctx -> VLCVideoLayout(ctx).also { videoLayout = it } },
@@ -2301,6 +2301,7 @@ private fun VlcSettingsDialog(
     val advancedDisplayFocusRequesters = remember { List(6) { FocusRequester() } }
 
     PlaybackSettingsPanel(
+        focusKey = page,
         onDismissRequest = onNavigateBack,
         previewVideo = page == VlcSettingsPage.DISPLAY || page == VlcSettingsPage.DISPLAY_ADVANCED,
         containerColor = Color.Black,
@@ -2310,29 +2311,10 @@ private fun VlcSettingsDialog(
             Text(page.title, fontWeight = FontWeight.Bold)
         },
         text = {
-            val focusManager = LocalFocusManager.current
-            val pageEntryFocusRequester = remember(page) { FocusRequester() }
-            var pageEntryPending by remember(page) { mutableStateOf(true) }
-            LaunchedEffect(page) {
-                delay(80)
-                runCatching { pageEntryFocusRequester.requestFocus() }
-                delay(20)
-                if (focusManager.moveFocus(FocusDirection.Next)) {
-                    pageEntryPending = false
-                }
-            }
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (pageEntryPending) {
-                    Spacer(
-                        Modifier
-                            .size(1.dp)
-                            .focusRequester(pageEntryFocusRequester)
-                            .focusable(),
-                    )
-                }
                 when (page) {
                     VlcSettingsPage.MAIN -> {
                         Surface(

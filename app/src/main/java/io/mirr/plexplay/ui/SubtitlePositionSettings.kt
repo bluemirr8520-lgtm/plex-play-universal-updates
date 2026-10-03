@@ -11,7 +11,6 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,7 +41,6 @@ internal fun SubtitlePositionSettings(
     val verticalFocus = remember { FocusRequester() }
     val resetFocus = remember { FocusRequester() }
     val writingFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { horizontalFocus.requestFocus() }
 
     SubtitlePositionSlider(
         label = "가로 위치",

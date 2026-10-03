@@ -21,9 +21,12 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performScrollTo
@@ -187,6 +190,117 @@ class PlaybackSettingsPanelTest {
             assertEquals(1, dismissals)
             assertEquals(0, playerClicks)
         }
+    }
+
+    @Test
+    fun remotePanelCanAcquireARealButtonWhenOpenedInTouchMode() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        var wasInTouchMode = true
+        compose.runOnUiThread { wasInTouchMode = compose.activity.window.decorView.isInTouchMode }
+        instrumentation.setInTouchMode(true)
+        instrumentation.waitForIdleSync()
+        try {
+            compose.setContent {
+                MaterialTheme {
+                    PlaybackSettingsPanel(
+                        onDismissRequest = {},
+                        preferRemoteInput = true,
+                        title = { Text("Settings") },
+                        text = {
+                            Column(Modifier.verticalScroll(rememberScrollState())) {
+                                Text("File information is not a focus target")
+                                Button(onClick = {}, modifier = Modifier.testTag("first")) { Text("First") }
+                                Button(onClick = {}, modifier = Modifier.testTag("second")) { Text("Second") }
+                            }
+                        },
+                        confirmButton = { Button(onClick = {}) { Text("Close") } },
+                    )
+                }
+            }
+            compose.onNodeWithTag("first").assertIsFocused()
+            compose.onNodeWithTag("first").performKeyInput { pressKey(Key.DirectionDown) }
+            compose.onNodeWithTag("second").assertIsFocused()
+        } finally {
+            instrumentation.setInTouchMode(wasInTouchMode)
+            instrumentation.waitForIdleSync()
+        }
+    }
+
+    @Test
+    fun changingPagesMovesFocusFromFooterToOptionsAndConfirmStillWorks() = withKeyboardInput {
+        val page = mutableStateOf(0)
+        var selections = 0
+        var dismissals = 0
+        compose.setContent {
+            MaterialTheme {
+                Box(Modifier.fillMaxSize()) {
+                    Button(onClick = { error("Player received settings input") }) { Text("Player") }
+                    PlaybackSettingsPanel(
+                        focusKey = page.value,
+                        onDismissRequest = { if (page.value == 0) dismissals++ else page.value = 0 },
+                        title = { Text("Settings") },
+                        text = {
+                            Column(Modifier.verticalScroll(rememberScrollState())) {
+                                if (page.value == 0) {
+                                    Button(onClick = { page.value = 1 }, modifier = Modifier.testTag("open")) { Text("Audio") }
+                                } else {
+                                    Button(onClick = { selections++ }, modifier = Modifier.testTag("option")) { Text("Automatic") }
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            Button(onClick = { if (page.value == 0) dismissals++ else page.value = 0 },
+                                modifier = Modifier.testTag("footer")) { Text("Back") }
+                        },
+                    )
+                }
+            }
+        }
+        repeat(2) {
+            compose.onNodeWithTag("open").assertIsFocused().performKeyInput { pressKey(Key.DirectionCenter) }
+            compose.onNodeWithTag("option").assertIsFocused().performKeyInput { pressKey(Key.DirectionCenter) }
+            compose.onNodeWithTag("option").assertIsFocused().performKeyInput { pressKey(Key.DirectionDown) }
+            compose.onNodeWithTag("footer").assertIsFocused().performKeyInput { pressKey(Key.DirectionCenter) }
+            compose.onNodeWithTag("open").assertIsFocused()
+        }
+        compose.runOnIdle { assertEquals(2, selections); assertEquals(0, dismissals) }
+        compose.onNodeWithTag("open").performKeyInput { pressKey(Key.Escape) }
+        compose.runOnIdle { assertEquals(1, dismissals) }
+    }
+
+    @Test
+    fun subtitlePositionArrowsLeaveSlidersAndReachWritingAndBack() = withKeyboardInput {
+        val horizontal = mutableStateOf(0)
+        val vertical = mutableStateOf(0)
+        val writing = mutableStateOf(false)
+        compose.setContent {
+            MaterialTheme {
+                PlaybackSettingsPanel(
+                    focusKey = "subtitle-position",
+                    onDismissRequest = {},
+                    title = { Text("Subtitle position") },
+                    text = {
+                        Column(Modifier.verticalScroll(rememberScrollState())) {
+                            SubtitlePositionSettings(horizontal.value, vertical.value, writing.value,
+                                onPositionChanged = { x, y -> horizontal.value = x; vertical.value = y },
+                                onVerticalWritingChanged = { writing.value = it })
+                        }
+                    },
+                    confirmButton = { Button(onClick = {}, modifier = Modifier.testTag("footer")) { Text("Back") } },
+                )
+            }
+        }
+        compose.onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsActions.SetProgress))[0].assertIsFocused().performKeyInput {
+            pressKey(Key.DirectionRight)
+            pressKey(Key.DirectionDown)
+        }
+        compose.onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsActions.SetProgress))[1].assertIsFocused().performKeyInput { pressKey(Key.DirectionDown) }
+        compose.runOnIdle { assertEquals(5, horizontal.value); assertEquals(0, vertical.value) }
+        compose.onNodeWithText("자막 위치 가운데로").assertIsFocused().performKeyInput { pressKey(Key.DirectionDown) }
+        compose.onNodeWithText("자막 세로쓰기: 끔").assertIsFocused().performKeyInput { pressKey(Key.DirectionCenter) }
+        compose.onNodeWithText("자막 세로쓰기: 켬").assertIsFocused().performKeyInput { pressKey(Key.DirectionDown) }
+        compose.onNodeWithTag("footer").assertIsFocused()
+        compose.runOnIdle { assertTrue(writing.value) }
     }
 
     @Test

@@ -20,10 +20,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,12 +30,14 @@ import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.semantics.dialog
 import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.paneTitle
@@ -52,6 +53,8 @@ import androidx.compose.ui.unit.dp
 internal fun PlaybackSettingsPanel(
     onDismissRequest: () -> Unit,
     modifier: Modifier = Modifier,
+    focusKey: Any = Unit,
+    preferRemoteInput: Boolean = LocalContext.current.isTelevisionDevice(),
     previewVideo: Boolean = false,
     containerColor: Color = Color.Black,
     titleContentColor: Color = Color.White,
@@ -61,16 +64,21 @@ internal fun PlaybackSettingsPanel(
     confirmButton: @Composable () -> Unit,
 ) {
     val focusManager = LocalFocusManager.current
-    val entryFocusRequester = remember { FocusRequester() }
+    val inputModeManager = LocalInputModeManager.current
+    val contentFocusRequester = remember { FocusRequester() }
+    val footerFocusRequester = remember { FocusRequester() }
     val dismissKeysDown = remember { mutableSetOf<Int>() }
     val dismiss by rememberUpdatedState(onDismissRequest)
-    var hasPanelFocus by remember { mutableStateOf(false) }
 
     BackHandler { dismiss() }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(preferRemoteInput) {
+        if (preferRemoteInput) inputModeManager.requestInputMode(InputMode.Keyboard)
+    }
+    LaunchedEffect(focusKey, inputModeManager.inputMode) {
         withFrameNanos { }
-        // Media3 and VLC can choose a more specific initial item themselves.
-        if (!hasPanelFocus) entryFocusRequester.requestFocus()
+        // Focus an actual option, not a focusable panel or a temporary invisible spacer.
+        // Replacing the page's content group also prevents retaining focus on its footer.
+        if (!contentFocusRequester.requestFocus()) footerFocusRequester.requestFocus()
     }
 
     Box(
@@ -132,8 +140,6 @@ internal fun PlaybackSettingsPanel(
                     false
                 }
             }
-            .focusRequester(entryFocusRequester)
-            .onFocusChanged { hasPanelFocus = it.hasFocus }
             .focusProperties { onExit = { cancelFocusChange() } }
             .focusGroup(),
         contentAlignment = Alignment.Center,
@@ -169,11 +175,15 @@ internal fun PlaybackSettingsPanel(
                     }
                     CompositionLocalProvider(LocalContentColor provides textContentColor) {
                         ProvideTextStyle(MaterialTheme.typography.bodyMedium) {
-                            Box(Modifier.weight(1f, fill = false).fillMaxWidth()) { text() }
+                            key(focusKey) {
+                                Box(Modifier.weight(1f, fill = false).fillMaxWidth()
+                                    .focusRequester(contentFocusRequester).focusGroup()) { text() }
+                            }
                         }
                     }
                     Box(
-                        Modifier.fillMaxWidth().padding(top = 16.dp),
+                        Modifier.fillMaxWidth().padding(top = 16.dp)
+                            .focusRequester(footerFocusRequester).focusGroup(),
                         contentAlignment = Alignment.CenterEnd,
                     ) { confirmButton() }
                 }
