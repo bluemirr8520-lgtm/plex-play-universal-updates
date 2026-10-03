@@ -59,23 +59,38 @@ class PlexApi(
     suspend fun recentlyAdded(
         sectionKey: String,
         sectionType: String,
-    ): List<PlexItem> =
-        request(
-            path = if (sectionType == "show") {
-                "/library/sections/$sectionKey/all"
-            } else {
-                "/library/sections/$sectionKey/recentlyAdded"
+    ): List<PlexItem> {
+        if (sectionType == "show") return loadRecentSeries(
+            sectionId = sectionKey,
+            loadEpisodePage = { start, size ->
+                request(
+                    path = "/library/sections/$sectionKey/all",
+                    query = mapOf(
+                        "type" to "4",
+                        "sort" to "addedAt:desc",
+                        "includeMedia" to "0",
+                        "X-Plex-Container-Start" to start.toString(),
+                        "X-Plex-Container-Size" to size.toString(),
+                    ),
+                ) { PlexXmlParser.items(it) }
             },
-            query = buildMap {
-                put("includeMedia", "1")
-                put("X-Plex-Container-Start", "0")
-                put("X-Plex-Container-Size", "20")
-                if (sectionType == "show") {
-                    put("type", "2")
-                    put("sort", "addedAt:desc")
-                }
+            loadShowMetadata = { ids ->
+                // One lightweight batch replaces an individual request per Show.
+                request(
+                    path = "/library/metadata/${ids.joinToString(",")}",
+                    query = mapOf("includeMedia" to "0", "includeStreams" to "0"),
+                ) { PlexXmlParser.items(it) }
             },
+        )
+        return request(
+            path = "/library/sections/$sectionKey/recentlyAdded",
+            query = mapOf(
+                "includeMedia" to "1",
+                "X-Plex-Container-Start" to "0",
+                "X-Plex-Container-Size" to "20",
+            ),
         ) { PlexXmlParser.items(it) }
+    }
 
     suspend fun onDeck(): List<PlexItem> =
         request(

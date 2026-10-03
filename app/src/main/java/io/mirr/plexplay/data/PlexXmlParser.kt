@@ -240,6 +240,10 @@ internal object PlexXmlParser {
         val childCount: Int,
         val episodeNumber: Int?,
         val seasonNumber: Int?,
+        val addedAtSeconds: Long?,
+        val grandparentTitle: String?,
+        val grandparentThumb: String?,
+        val grandparentArt: String?,
         var partKey: String? = null,
         var filePath: String? = null,
         var selectedMediaIndex: Int = 0,
@@ -341,6 +345,10 @@ internal object PlexXmlParser {
             mediaFilePaths = mediaFilePaths.toList(),
             episodeNumber = episodeNumber,
             seasonNumber = seasonNumber,
+            addedAtSeconds = addedAtSeconds,
+            grandparentTitle = grandparentTitle,
+            grandparentThumb = grandparentThumb,
+            grandparentArt = grandparentArt,
         )
 
         companion object {
@@ -383,6 +391,10 @@ internal object PlexXmlParser {
                     childCount = parser.attr("childCount")?.toIntOrNull() ?: 0,
                     episodeNumber = parser.attr("index")?.toIntOrNull(),
                     seasonNumber = parser.attr("parentIndex")?.toIntOrNull(),
+                    addedAtSeconds = parser.attr("addedAt")?.toLongOrNull()?.takeIf { it >= 0 },
+                    grandparentTitle = grandparent,
+                    grandparentThumb = parser.attr("grandparentThumb"),
+                    grandparentArt = parser.attr("grandparentArt"),
                 )
             }
         }

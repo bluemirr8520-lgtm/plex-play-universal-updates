@@ -76,6 +76,10 @@ data class PlexItem(
     val seasonNumber: Int? = null,
     // Home-only enrichment; never changes the series' playback/browse identity.
     val latestEpisodeLabel: String? = null,
+    val addedAtSeconds: Long? = null,
+    val grandparentTitle: String? = null,
+    val grandparentThumb: String? = null,
+    val grandparentArt: String? = null,
 ) {
     val isPlayable: Boolean
         get() = type in setOf("movie", "episode", "clip", "video", "track") || partKey != null

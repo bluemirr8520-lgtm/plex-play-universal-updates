@@ -23,7 +23,7 @@ class PlexBrowseApiTest {
     @Test fun latestEpisodeFetchIsOneSmallReadOnlySortedRequest() = runBlocking {
         Fixture(episode()).use { server ->
             val result = server.api.latestEpisode(show())!!
-            assertEquals("최신 · S2:E8 · Latest", formatLatestEpisodeLabel(result))
+            assertEquals("S2:E8 · Latest", formatLatestEpisodeLabel(result))
             val request = server.requests.single()
             assertEquals("GET", request.method)
             assertEquals("/library/metadata/42/allLeaves", request.path)
@@ -36,6 +36,49 @@ class PlexBrowseApiTest {
     @Test fun latestEpisodeDoesNotLeakAnotherSeriesOrLibrary() = runBlocking {
         for (xml in listOf(episode("43"), episode(section = "8"), "<MediaContainer/>")) {
             Fixture(xml).use { assertNull(it.api.latestEpisode(show())) }
+        }
+    }
+
+    @Test fun recentShowsQueryEpisodesAndBatchSeriesInsteadOfSeriesRegistrationOrder() = runBlocking {
+        val episodes = """<MediaContainer librarySectionID="7"><Video ratingKey="50" key="/library/metadata/50" type="episode" title="Added episode" grandparentRatingKey="42" grandparentTitle="Old Series" addedAt="200" parentIndex="2" index="8"/></MediaContainer>"""
+        val shows = """<MediaContainer librarySectionID="7"><Directory ratingKey="42" key="/library/metadata/42/children" type="show" title="Old Series" thumb="/poster/42" leafCount="8" viewedLeafCount="3" addedAt="1"/></MediaContainer>"""
+        Fixture(episodes, responseBody = { if (it.path.startsWith("/library/metadata/")) shows else episodes }).use { server ->
+            val result = server.api.recentlyAdded("7", "show").single()
+            assertEquals("show", result.type)
+            assertEquals("42", result.ratingKey)
+            assertEquals("/poster/42", result.thumb)
+            assertEquals(8, result.leafCount)
+            assertEquals(3, result.viewedLeafCount)
+            assertEquals("S2:E8 · Added episode", result.latestEpisodeLabel)
+            val requests = server.requests
+            assertTrue(requests.all { it.method == "GET" && it.query["includeMedia"] == "0" })
+            assertEquals("4", requests.first().query["type"])
+            assertEquals("addedAt:desc", requests.first().query["sort"])
+            assertEquals("100", requests.first().query["X-Plex-Container-Size"])
+            assertEquals("/library/metadata/42", requests.last().path)
+            assertEquals("0", requests.last().query["includeStreams"])
+            assertEquals(3, requests.size) // Repeated-page guard, then one batch.
+        }
+    }
+
+    @Test fun movieRecentRowsNeverQueryEpisodesOrReceiveEpisodeLabels() = runBlocking {
+        Fixture("""<MediaContainer><Video ratingKey="60" key="/library/metadata/60" type="movie" title="Movie"/></MediaContainer>""").use { server ->
+            val result = server.api.recentlyAdded("7", "movie").single()
+            assertNull(result.latestEpisodeLabel)
+            val request = server.requests.single()
+            assertEquals("/library/sections/7/recentlyAdded", request.path)
+            assertEquals("1", request.query["includeMedia"])
+            assertFalse(request.query.containsKey("type"))
+        }
+    }
+
+    @Test fun recentShowsBatchOnlySelectedValidatedIdsInEpisodeAdditionOrder() = runBlocking {
+        val episodes = """<MediaContainer librarySectionID="7"><Video ratingKey="50" key="/library/metadata/50" type="episode" title="A" grandparentRatingKey="42" grandparentTitle="A" addedAt="100"/><Video ratingKey="51" key="/library/metadata/51" type="episode" title="B" grandparentRatingKey="43" grandparentTitle="B" addedAt="200"/><Video ratingKey="52" key="/library/metadata/52" type="episode" title="Invalid" grandparentRatingKey="44/../45"/></MediaContainer>"""
+        Fixture(episodes).use { server ->
+            val rows = server.api.recentlyAdded("7", "show")
+            assertEquals(listOf("43", "42"), rows.map { it.ratingKey })
+            assertEquals("/library/metadata/43,42", server.requests.last().path)
+            assertTrue(rows.all { it.type == "show" && !it.isPlayable })
         }
     }
 
@@ -99,7 +142,8 @@ class PlexBrowseApiTest {
 
     private data class Request(val method: String, val path: String, val query: Map<String, String>)
 
-    private class Fixture(private val body: String, private val stall: Boolean = false) : AutoCloseable {
+    private class Fixture(private val body: String, private val stall: Boolean = false,
+        private val responseBody: (Request) -> String = { body }) : AutoCloseable {
         private val listener = ServerSocket().apply { bind(InetSocketAddress("127.0.0.1", 0)) }
         val requests = CopyOnWriteArrayList<Request>()
         val stalled = CompletableDeferred<Unit>()
@@ -131,7 +175,7 @@ class PlexBrowseApiTest {
             }
             val request = Request(parts[0], target.substringBefore('?'), query)
             requests += request
-            val bytes = body.toByteArray(Charsets.UTF_8)
+            val bytes = responseBody(request).toByteArray(Charsets.UTF_8)
             val output = socket.getOutputStream()
             output.write(("HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n").toByteArray())
             if (stall && request.path.endsWith("/all")) {

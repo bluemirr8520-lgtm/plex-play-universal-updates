@@ -265,7 +265,7 @@ class PlexViewModel(
         val rows = _state.value.homeRows
         homeEnrichmentJob = viewModelScope.launch {
             supervisorScope {
-                rows.flatMap { row -> row.items.filter { it.type == "show" }.map { row.section to it } }
+                rows.flatMap { row -> row.items.filter { it.type == "show" && it.latestEpisodeLabel == null }.map { row.section to it } }
                     .map { (section, show) -> async {
                         val label = optionalRequest { repository.latestEpisodeLabel(show) } ?: return@async
                         currentCoroutineContext().ensureActive()

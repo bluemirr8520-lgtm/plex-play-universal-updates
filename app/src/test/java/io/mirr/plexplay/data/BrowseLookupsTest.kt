@@ -65,24 +65,28 @@ class BrowseLookupsTest {
         val series = item("42", "show")
         val episode = item("50", "episode").copy(title = "마지막 이야기", seasonNumber = 2, episodeNumber = 8)
         val enriched = series.copy(latestEpisodeLabel = formatLatestEpisodeLabel(episode))
-        assertEquals("최신 · S2:E8 · 마지막 이야기", enriched.latestEpisodeLabel)
+        assertEquals("S2:E8 · 마지막 이야기", enriched.latestEpisodeLabel)
         assertEquals(series.ratingKey, enriched.ratingKey)
         assertEquals(series.key, enriched.key)
         assertFalse(enriched.isPlayable)
     }
 
     @Test fun episodeLabelHandlesMissingNumbersAndSpecials() {
-        assertEquals("최신 · Title 50", formatLatestEpisodeLabel(item("50", "episode")))
-        assertEquals("최신 · 3화 · Title 50", formatLatestEpisodeLabel(item("50", "episode").copy(episodeNumber = 3)))
-        assertEquals("최신 · S0:E1 · Title 50", formatLatestEpisodeLabel(item("50", "episode").copy(seasonNumber = 0, episodeNumber = 1)))
+        assertEquals("Title 50", formatLatestEpisodeLabel(item("50", "episode")))
+        assertEquals("3화 · Title 50", formatLatestEpisodeLabel(item("50", "episode").copy(episodeNumber = 3)))
+        assertEquals("S0:E1 · Title 50", formatLatestEpisodeLabel(item("50", "episode").copy(seasonNumber = 0, episodeNumber = 1)))
     }
 
     @Test fun parserReadsEpisodeNumbersEvenWithoutMediaStreams() {
-        val xml = """<MediaContainer librarySectionID="7"><Video ratingKey="50" key="/library/metadata/50" type="episode" title="Episode" index="8" parentIndex="2" grandparentRatingKey="42"/></MediaContainer>"""
+        val xml = """<MediaContainer librarySectionID="7"><Video ratingKey="50" key="/library/metadata/50" type="episode" title="Episode" index="8" parentIndex="2" grandparentRatingKey="42" addedAt="1234567890" grandparentTitle="Series" grandparentThumb="/series/poster" grandparentArt="/series/art"/></MediaContainer>"""
         val episode = PlexXmlParser.items(xml.byteInputStream()).single()
         assertEquals(8, episode.episodeNumber)
         assertEquals(2, episode.seasonNumber)
         assertEquals("7", episode.librarySectionId)
+        assertEquals(1234567890L, episode.addedAtSeconds)
+        assertEquals("Series", episode.grandparentTitle)
+        assertEquals("/series/poster", episode.grandparentThumb)
+        assertEquals("/series/art", episode.grandparentArt)
     }
 
     @Test fun actorResultsAppearBeforeSlowGenreLookupCompletes() = runBlocking {

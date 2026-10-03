@@ -53,7 +53,7 @@ internal fun formatLatestEpisodeLabel(episode: PlexItem): String {
         episode.episodeNumber != null -> "${episode.episodeNumber}화"
         else -> null
     }
-    return listOfNotNull("최신", number, episode.title.takeIf { it.isNotBlank() }).joinToString(" · ")
+    return listOfNotNull(number, episode.title.takeIf { it.isNotBlank() }).joinToString(" · ")
 }
 
 /** Each successful filter is shown immediately; a slow genre lookup cannot hide actor results. */
