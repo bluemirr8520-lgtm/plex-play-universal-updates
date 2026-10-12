@@ -555,6 +555,10 @@ class PlexViewModel(
             showLibraryOrder(false)
             return true
         }
+        if (_state.value.isSettingsVisible) {
+            showSettings(false)
+            return true
+        }
         if (_state.value.playback != null) {
             closePlayer()
             return true

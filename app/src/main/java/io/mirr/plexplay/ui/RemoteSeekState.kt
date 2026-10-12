@@ -5,7 +5,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
-internal const val RemoteSeekIdleMs = 300L
+internal const val RemoteSeekIdleMs = 600L
 
 /** A transient target only: repeats must not seek the decoder or persist watch progress. */
 internal class RemoteSeekState {
@@ -36,6 +36,10 @@ internal class RemoteSeekState {
         val target = previewMs?.takeIf { durationMs > 0L }?.coerceIn(0L, durationMs)
         cancel()
         return target
+    }
+
+    fun keepAlive() {
+        if (previewMs != null) revision++
     }
 
     fun cancel() { previewMs = null }

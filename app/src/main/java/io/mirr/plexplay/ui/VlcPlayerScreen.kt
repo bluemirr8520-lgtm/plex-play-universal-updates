@@ -457,6 +457,7 @@ fun VlcPlayerScreen(
     var leftLongPressSeeking by remember { mutableStateOf(false) }
     var rightLongPressSeeking by remember { mutableStateOf(false) }
     val remoteSeek = remember(source.playbackId, source.url, rendererRevision) { RemoteSeekState() }
+    val remoteSeekInput = remember(remoteSeek) { RemoteSeekKeyInput() }
     var confirmLongPressConsumed by remember { mutableStateOf(false) }
     var isPlaying by remember { mutableStateOf(false) }
     var isBuffering by remember { mutableStateOf(true) }
@@ -774,12 +775,13 @@ fun VlcPlayerScreen(
         gestureFeedbackRevision++
     }
 
-    fun cancelRemoteSeek() {
+    fun cancelRemoteSeek(resetInput: Boolean = true) {
         remoteSeek.cancel()
+        if (resetInput) remoteSeekInput.reset()
         leftLongPressSeeking = false
         rightLongPressSeeking = false
     }
-    val latestCancelRemoteSeek by rememberUpdatedState({ cancelRemoteSeek() })
+    val latestCancelRemoteSeek by rememberUpdatedState({ cancelRemoteSeek(resetInput = false) })
 
     fun openSettings(page: VlcSettingsPage = VlcSettingsPage.MAIN) {
         cancelRemoteSeek()
@@ -1478,6 +1480,7 @@ fun VlcPlayerScreen(
             cancelRemoteSeek()
             return true
         }
+        if (remoteSeekInput.consumeFastRepeat(nativeEvent, remoteSeek)) return true
         val heldDirectionReleased = isUp && (
             (nativeEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_LEFT && leftLongPressSeeking) ||
                 (nativeEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_RIGHT && rightLongPressSeeking)
@@ -1950,7 +1953,9 @@ fun VlcPlayerScreen(
                             setShowNextButton(true)
                             setShowRewindButton(true)
                             setShowFastForwardButton(true)
-                            findViewById<DefaultTimeBar>(androidx.media3.ui.R.id.exo_progress)?.addListener(
+                            findViewById<DefaultTimeBar>(androidx.media3.ui.R.id.exo_progress)
+                                ?.apply { setKeyTimeIncrement(RemoteSeekStepMs) }
+                                ?.addListener(
                                 object : TimeBar.OnScrubListener {
                                     override fun onScrubStart(timeBar: TimeBar, position: Long) {
                                         latestCancelRemoteSeek()

@@ -1261,13 +1261,16 @@ fun PlayerScreen(
     var rightLongPressSeeking by remember(player) { mutableStateOf(false) }
     val lastHandledRemoteEventSignature = remember(player) { LongArray(1) }
     val remoteSeek = remember(player) { RemoteSeekState() }
+    val remoteSeekInput = remember(player) { RemoteSeekKeyInput() }
 
-    fun cancelRemoteSeek() {
+    fun cancelRemoteSeek(resetInput: Boolean = true) {
         remoteSeek.cancel()
+        if (resetInput) remoteSeekInput.reset()
         leftLongPressSeeking = false
         rightLongPressSeeking = false
     }
-    val latestCancelRemoteSeek by rememberUpdatedState({ cancelRemoteSeek() })
+    // Native scrubbing starts on the same arrow press; preserve its repeat cadence.
+    val latestCancelRemoteSeek by rememberUpdatedState({ cancelRemoteSeek(resetInput = false) })
 
     fun openPlayerSettings(page: PlayerSettingsPage = PlayerSettingsPage.MAIN) {
         cancelRemoteSeek()
@@ -1365,6 +1368,10 @@ fun PlayerScreen(
         if (lastHandledRemoteEventSignature[0] == eventSignature) return true
         if (isUp && nativeEvent.isCanceled) {
             cancelRemoteSeek()
+            lastHandledRemoteEventSignature[0] = eventSignature
+            return true
+        }
+        if (remoteSeekInput.consumeFastRepeat(nativeEvent, remoteSeek)) {
             lastHandledRemoteEventSignature[0] = eventSignature
             return true
         }
@@ -2197,6 +2204,7 @@ fun PlayerScreen(
                     keepScreenOn = true
                     this.player = player
                     (findViewById<View>(androidx.media3.ui.R.id.exo_progress) as? TimeBar)
+                        ?.apply { setKeyTimeIncrement(RemoteSeekStepMs) }
                         ?.addListener(object : TimeBar.OnScrubListener {
                             override fun onScrubStart(timeBar: TimeBar, position: Long) { latestCancelRemoteSeek() }
                             override fun onScrubMove(timeBar: TimeBar, position: Long) = Unit

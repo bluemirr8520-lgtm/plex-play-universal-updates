@@ -1,6 +1,7 @@
 package io.mirr.plexplay
 
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -15,6 +16,8 @@ import io.mirr.plexplay.ui.PlexViewModelFactory
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private val remoteBackPress = RemoteBackPress()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -24,7 +27,7 @@ class MainActivity : ComponentActivity() {
                 val viewModel: PlexViewModel = viewModel(
                     factory = PlexViewModelFactory(repository),
                 )
-                PlexPlayApp(viewModel)
+                PlexPlayApp(viewModel, onExit = { finish() })
             }
         }
         lifecycleScope.launch {
@@ -35,5 +38,22 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         AppUpdater.installPendingUpdate(this)
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode != KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> remoteBackPress.down(event.downTime, event.repeatCount)
+            KeyEvent.ACTION_UP -> if (remoteBackPress.up(event.downTime, event.isCanceled)) {
+                onBackPressedDispatcher.onBackPressed()
+            }
+            else -> remoteBackPress.reset()
+        }
+        return true
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus) remoteBackPress.reset()
     }
 }

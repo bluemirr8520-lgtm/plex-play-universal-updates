@@ -1,6 +1,5 @@
 package io.mirr.plexplay.ui
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
@@ -141,25 +140,11 @@ import kotlinx.coroutines.delay
 import java.util.concurrent.TimeUnit
 
 @Composable
-fun PlexPlayApp(viewModel: PlexViewModel) {
+fun PlexPlayApp(viewModel: PlexViewModel, onExit: () -> Unit) {
     val state by viewModel.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    val hasInternalBackTarget =
-        state.selectedItem != null ||
-            state.canNavigateBack ||
-            !state.isHome ||
-            state.isSettingsVisible
-            || state.isLibraryOrderVisible
-            || state.isAccountVisible
-            || state.isCollectionSettingsVisible
-    BackHandler(
-        enabled = state.connection.isConfigured &&
-            state.playback == null &&
-            hasInternalBackTarget,
-    ) {
-        if (!viewModel.navigateBack()) viewModel.showSettings(false)
-    }
+    AppBackHandler(onBack = viewModel::navigateBack, onExit = onExit)
 
     LaunchedEffect(state.error) {
         state.error?.let {
