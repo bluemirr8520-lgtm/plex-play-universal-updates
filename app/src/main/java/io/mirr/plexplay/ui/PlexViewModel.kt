@@ -693,6 +693,7 @@ class PlexViewModel(
         val returnToHome = currentState.isHome
         val selectedSection = currentState.selectedSection
         val sections = currentState.sections
+        val completionConnection = repository.connection()
         val nextItem = if (currentState.autoPlayNext) {
             nextPlaybackItem()
         } else {
@@ -714,21 +715,36 @@ class PlexViewModel(
                 it.copy(
                     playback = null,
                     selectedItem = null,
+                    isLoading = false,
                     hasPreviousPlayback = false,
                     previousPlaybackTitle = null,
                     hasNextPlayback = false,
                     nextPlaybackTitle = null,
-                    notice = "영상 재생이 끝나 보았음으로 표시했습니다.",
+                    notice = "영상 재생을 마쳤습니다.",
                 )
             }
         }
         viewModelScope.launch {
             try {
-                runCatching {
+                try {
                     repository.timeline(source, "stopped", positionMs)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // A timeline outage must not retain the finished decoder.
                 }
-                if (!repository.setWatched(source, watched = true)) return@launch
-                updateCompletedPlaybackCollection(source)
+                val watchedSaved = try {
+                    repository.setWatched(source, watched = true)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    if (repository.connection() == completionConnection) _state.update {
+                        it.copy(notice = "재생을 마쳤지만 시청 기록을 저장하지 못했습니다.")
+                    }
+                    false
+                }
+                if (watchedSaved) updateCompletedPlaybackCollection(source)
+                if (repository.connection() != completionConnection) return@launch
                 if (nextItem != null) {
                     // Closing, signing out, or selecting another video while the
                     // watched update is pending must cancel this automatic next.
@@ -739,12 +755,17 @@ class PlexViewModel(
                         notice = "다음화를 자동 재생합니다.",
                         requiredFolder = playbackFolderKey(source.filePath),
                     )
-                } else if (returnToHome) {
+                } else if (returnToHome && _state.value.isHome && _state.value.playback == null &&
+                    _state.value.selectedItem == null && playbackStartJob?.isActive != true
+                ) {
                     loadHomeInternal(sections)
-                } else if (selectedSection != null) {
+                } else if (selectedSection != null && _state.value.playback == null &&
+                    _state.value.selectedSection?.key == selectedSection.key
+                ) {
                     val watchedItems = runCatching {
                         repository.watched(selectedSection)
                     }.getOrNull()
+                    if (repository.connection() != completionConnection) return@launch
                     val continueItems = runCatching {
                         repository.sectionOnDeck(selectedSection.key)
                     }.getOrNull()
@@ -767,13 +788,21 @@ class PlexViewModel(
                         )
                     }
                 }
-            } catch (error: Throwable) {
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
                 // An ended video must not retain a stale next-item index if its
                 // successor moved folders or could not be opened.
-                if (nextItem != null) closePlayer()
-                showError(error)
+                if (nextItem != null && matchesPlaybackCompletion(_state.value.playback, source)) {
+                    closePlayer()
+                    showError(error)
+                }
             } finally {
-                _state.update { it.copy(isLoading = false) }
+                _state.update {
+                    if (matchesPlaybackCompletion(it.playback, source) ||
+                        (it.playback == null && playbackStartJob?.isActive != true)
+                    ) it.copy(isLoading = false) else it
+                }
             }
         }
     }
@@ -1253,6 +1282,7 @@ class PlexViewModel(
             current.copy(
                 playback = source,
                 selectedItem = null,
+                isLoading = false,
                 hasPreviousPlayback = previousItem != null,
                 previousPlaybackTitle = previousItem?.title,
                 hasNextPlayback = nextItem != null,

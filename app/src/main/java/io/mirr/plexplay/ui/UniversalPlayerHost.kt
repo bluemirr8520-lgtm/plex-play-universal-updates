@@ -3,6 +3,7 @@ package io.mirr.plexplay.ui
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -10,6 +11,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import io.mirr.plexplay.data.PlaybackQuality
 import io.mirr.plexplay.data.PlaybackSource
+import io.mirr.plexplay.data.matchesPlaybackCompletion
 
 private enum class UniversalPlaybackEngine {
     MEDIA3,
@@ -72,6 +74,14 @@ fun UniversalPlayerHost(
         fallbackPositionMs = source.resumePositionMs
     }
 
+    key(source.playbackId, source.url, engine) {
+    PlaybackCompletionBoundary(
+        onCompleted = { position -> onPlaybackCompleted(source, position) },
+        onClose = onClose,
+    ) { complete ->
+    val completeCurrent: (PlaybackSource, Long) -> Unit = { endedSource, position ->
+        if (matchesPlaybackCompletion(source, endedSource)) complete(position)
+    }
     when (engine) {
         UniversalPlaybackEngine.MEDIA3 -> PlayerScreen(
             source = source,
@@ -86,7 +96,7 @@ fun UniversalPlayerHost(
             onPlayPrevious = onPlayPrevious,
             onPlayNext = onPlayNext,
             onClose = onClose,
-            onPlaybackCompleted = onPlaybackCompleted,
+            onPlaybackCompleted = completeCurrent,
             onProgress = onProgress,
             onPlaybackUnavailable = { positionMs ->
                 fallbackPositionMs = positionMs
@@ -107,8 +117,10 @@ fun UniversalPlayerHost(
             onPlayPrevious = onPlayPrevious,
             onPlayNext = onPlayNext,
             onClose = onClose,
-            onPlaybackCompleted = onPlaybackCompleted,
+            onPlaybackCompleted = completeCurrent,
             onProgress = onProgress,
         )
+    }
+    }
     }
 }

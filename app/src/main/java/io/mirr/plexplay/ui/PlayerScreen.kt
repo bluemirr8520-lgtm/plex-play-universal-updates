@@ -1247,7 +1247,6 @@ fun PlayerScreen(
         if (completionHandled) return
         completionHandled = true
         val position = player.currentPosition.coerceAtLeast(0)
-        player.pause()
         onPlaybackCompleted(source, position)
     }
 
@@ -1262,6 +1261,12 @@ fun PlayerScreen(
     val lastHandledRemoteEventSignature = remember(player) { LongArray(1) }
     val remoteSeek = remember(player) { RemoteSeekState() }
     val remoteSeekInput = remember(player) { RemoteSeekKeyInput() }
+    val controllerPlayer = remember(player, remoteSeek) {
+        object : androidx.media3.common.ForwardingPlayer(player) {
+            override fun getCurrentPosition(): Long = remoteSeek.previewMs ?: super.getCurrentPosition()
+            override fun getContentPosition(): Long = remoteSeek.previewMs ?: super.getContentPosition()
+        }
+    }
 
     fun cancelRemoteSeek(resetInput: Boolean = true) {
         remoteSeek.cancel()
@@ -1301,7 +1306,10 @@ fun PlayerScreen(
     }
 
     fun seekByRemote(deltaMs: Long, deferred: Boolean = false) {
-        val target = remoteSeek.step(deltaMs, player.currentPosition, remoteSeekDuration()) ?: return
+        val target = if (deferred) {
+            remoteSeek.hold(deltaMs, player.currentPosition, remoteSeekDuration(), android.os.SystemClock.uptimeMillis())
+        } else remoteSeek.step(deltaMs, player.currentPosition, remoteSeekDuration())
+        if (target == null) return
         if (!deferred) commitRemoteSeek()
         showGestureFeedback(
             if (deferred) "이동 ${formatGestureTime(target)}"
@@ -1309,10 +1317,33 @@ fun PlayerScreen(
         )
     }
 
-    LaunchedEffect(remoteSeek, remoteSeek.previewMs, remoteSeek.revision) {
-        if (remoteSeek.previewMs != null) {
+    LaunchedEffect(remoteSeek, remoteSeek.isHolding, remoteSeek.revision) {
+        if (!remoteSeek.isHolding && remoteSeek.previewMs != null) {
             delay(RemoteSeekIdleMs)
             commitRemoteSeek()
+        }
+    }
+    LaunchedEffect(remoteSeek, remoteSeek.isHolding) {
+        if (remoteSeek.isHolding) {
+            val view = playerViewHandle
+            val previousTimeout = view?.controllerShowTimeoutMs
+            view?.controllerShowTimeoutMs = 0
+            view?.showController()
+            try {
+                while (remoteSeek.isHolding) {
+                    delay(RemoteSeekFrameMs)
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (remoteSeek.holdExpired(now)) {
+                        commitRemoteSeek()
+                    } else remoteSeek.advanceHold(now, remoteSeekDuration())?.let { target ->
+                        val label = formatGestureTime(target)
+                        updateRemoteSeekPreview(view, target, label)
+                        showGestureFeedback("이동 $label")
+                    }
+                }
+            } finally {
+                if (previousTimeout != null) view?.controllerShowTimeoutMs = previousTimeout
+            }
         }
     }
     DisposableEffect(remoteSeek) { onDispose { remoteSeek.cancel() } }
@@ -1393,11 +1424,24 @@ fun PlayerScreen(
             lastHandledRemoteEventSignature[0] = eventSignature
             return true
         }
-        // The native time bar already previews repeats and commits on scrub stop.
+        // Keyboard seeking uses the same continuous preview as hidden controls.
+        // Do not start the native time bar's separate delayed scrub/seek timer.
         if (controllerVisible && nativeEvent.keyCode in listOf(
                 AndroidKeyEvent.KEYCODE_DPAD_LEFT, AndroidKeyEvent.KEYCODE_DPAD_RIGHT,
             ) && playerViewHandle?.findViewById<View>(androidx.media3.ui.R.id.exo_progress)?.hasFocus() == true
-        ) return false
+        ) {
+            if (isDown) {
+                val backwards = nativeEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_LEFT
+                if (nativeEvent.repeatCount > 0) {
+                    leftLongPressSeeking = backwards
+                    rightLongPressSeeking = !backwards
+                }
+                seekByRemote(if (backwards) -RemoteSeekStepMs else RemoteSeekStepMs,
+                    deferred = nativeEvent.repeatCount > 0)
+            }
+            lastHandledRemoteEventSignature[0] = eventSignature
+            return true
+        }
 
         val controllerNavigationKey = nativeEvent.keyCode in listOf(
             AndroidKeyEvent.KEYCODE_DPAD_CENTER,
@@ -1722,18 +1766,24 @@ fun PlayerScreen(
         }
         player.addListener(fallbackListener)
         onDispose {
-            player.removeListener(fallbackListener)
-            onProgress(source, player.currentPosition.coerceAtLeast(0), "stopped")
-            player.release()
-            if (window != null && previousScreenBrightness != null) {
-                window.attributes = window.attributes.apply {
-                    screenBrightness = previousScreenBrightness
-                }
-            }
-            insetsController?.show(WindowInsetsCompat.Type.systemBars())
-            if (previousOrientation != null) {
-                activity.requestedOrientation = previousOrientation
-            }
+            cleanupPlayback(
+                onFailure = { step, error -> android.util.Log.w("PlexPlayUniversal", "Player cleanup: $step", error) },
+                "listener" to { player.removeListener(fallbackListener) },
+                "progress" to {
+                    if (!completionHandled) onProgress(source, player.currentPosition.coerceAtLeast(0), "stopped")
+                },
+                "detach" to { playerViewHandle?.player = null },
+                "release" to { player.release() },
+                "brightness" to {
+                    if (window != null && previousScreenBrightness != null) {
+                        window.attributes = window.attributes.apply { screenBrightness = previousScreenBrightness }
+                    }
+                },
+                "system bars" to { insetsController?.show(WindowInsetsCompat.Type.systemBars()); Unit },
+                "orientation" to {
+                    if (previousOrientation != null) activity.requestedOrientation = previousOrientation
+                },
+            )
         }
     }
 
@@ -2202,7 +2252,7 @@ fun PlayerScreen(
                     applyVideoScaleMode(this, videoScaleMode)
                     applyVideoScreenSettings(this, videoScreenSettings)
                     keepScreenOn = true
-                    this.player = player
+                    this.player = controllerPlayer
                     (findViewById<View>(androidx.media3.ui.R.id.exo_progress) as? TimeBar)
                         ?.apply { setKeyTimeIncrement(RemoteSeekStepMs) }
                         ?.addListener(object : TimeBar.OnScrubListener {

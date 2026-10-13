@@ -833,7 +833,10 @@ fun VlcPlayerScreen(
     fun seekBy(deltaMs: Long, deferred: Boolean = false) {
         val player = mediaPlayer ?: return
         val clock = player.time.takeIf { it > 0L } ?: positionMs
-        val target = remoteSeek.step(deltaMs, clock, remoteSeekDuration()) ?: return
+        val target = if (deferred) {
+            remoteSeek.hold(deltaMs, clock, remoteSeekDuration(), android.os.SystemClock.uptimeMillis())
+        } else remoteSeek.step(deltaMs, clock, remoteSeekDuration())
+        if (target == null) return
         if (!deferred) commitRemoteSeek()
         controlsVisible = true
         showGestureFeedback(
@@ -842,10 +845,26 @@ fun VlcPlayerScreen(
         )
     }
 
-    LaunchedEffect(remoteSeek, remoteSeek.previewMs, remoteSeek.revision) {
-        if (remoteSeek.previewMs != null) {
+    LaunchedEffect(remoteSeek, remoteSeek.isHolding, remoteSeek.revision) {
+        if (!remoteSeek.isHolding && remoteSeek.previewMs != null) {
             delay(RemoteSeekIdleMs)
             commitRemoteSeek()
+        }
+    }
+    LaunchedEffect(remoteSeek, remoteSeek.isHolding) {
+        if (remoteSeek.isHolding) {
+            controlsVisible = true
+            while (remoteSeek.isHolding) {
+                delay(RemoteSeekFrameMs)
+                val now = android.os.SystemClock.uptimeMillis()
+                if (remoteSeek.holdExpired(now)) {
+                    commitRemoteSeek()
+                } else remoteSeek.advanceHold(now, remoteSeekDuration())?.let { target ->
+                    val label = formatVlcTime(target)
+                    updateRemoteSeekPreview(transportView, target, label)
+                    showGestureFeedback("이동 $label")
+                }
+            }
         }
     }
     DisposableEffect(remoteSeek) { onDispose { remoteSeek.cancel() } }
@@ -876,16 +895,19 @@ fun VlcPlayerScreen(
             activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         }
         onDispose {
-            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            insetsController?.show(WindowInsetsCompat.Type.systemBars())
-            if (activity != null && previousOrientation != null) {
-                activity.requestedOrientation = previousOrientation
-            }
-            if (window != null && previousScreenBrightness != null) {
-                window.attributes = window.attributes.apply {
-                    screenBrightness = previousScreenBrightness
-                }
-            }
+            cleanupPlayback(
+                onFailure = { step, error -> Log.w("PlexPlayUniversal", "VLC window cleanup: $step", error) },
+                "screen flag" to { window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); Unit },
+                "system bars" to { insetsController?.show(WindowInsetsCompat.Type.systemBars()); Unit },
+                "orientation" to {
+                    if (activity != null && previousOrientation != null) activity.requestedOrientation = previousOrientation
+                },
+                "brightness" to {
+                    if (window != null && previousScreenBrightness != null) {
+                        window.attributes = window.attributes.apply { screenBrightness = previousScreenBrightness }
+                    }
+                },
+            )
         }
     }
 
@@ -1221,7 +1243,6 @@ fun VlcPlayerScreen(
                                         )
                                 if (endedNormally) {
                                     completed = true
-                                    latestOnProgress(source, actualPosition, "stopped")
                                     latestOnPlaybackCompleted(source, actualPosition)
                                 } else if (!recoverPlayback(actualPosition)) {
                                     isPlaying = false
@@ -1277,7 +1298,7 @@ fun VlcPlayerScreen(
                 restorePositionMs = runCatching { player.time }
                     .getOrDefault(positionMs)
                     .coerceAtLeast(positionMs)
-                latestOnProgress(source, restorePositionMs, "stopped")
+                if (!completed) runCatching { latestOnProgress(source, restorePositionMs, "stopped") }
                 mediaPlayer = null
                 runCatching { player.stop() }
                 runCatching { player.detachViews() }
@@ -1501,7 +1522,18 @@ fun VlcPlayerScreen(
         if (controlsVisible && nativeEvent.keyCode in listOf(
                 AndroidKeyEvent.KEYCODE_DPAD_LEFT, AndroidKeyEvent.KEYCODE_DPAD_RIGHT,
             ) && transportView?.findViewById<View>(androidx.media3.ui.R.id.exo_progress)?.hasFocus() == true
-        ) return false
+        ) {
+            if (isDown) {
+                val backwards = nativeEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_LEFT
+                if (nativeEvent.repeatCount > 0) {
+                    leftLongPressSeeking = backwards
+                    rightLongPressSeeking = !backwards
+                }
+                seekBy(if (backwards) -RemoteSeekStepMs else RemoteSeekStepMs,
+                    deferred = nativeEvent.repeatCount > 0)
+            }
+            return true
+        }
 
         val controllerNavigationKey = nativeEvent.keyCode in listOf(
             AndroidKeyEvent.KEYCODE_DPAD_CENTER,

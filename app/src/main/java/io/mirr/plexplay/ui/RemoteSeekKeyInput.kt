@@ -25,7 +25,7 @@ internal class RemoteSeekKeyInput {
                 event.keyCode, event.downTime, event.eventTime, event.repeatCount, nowMs,
             )
         ) {
-            seek.keepAlive()
+            seek.keepAlive(nowMs)
             return true
         }
         return false
