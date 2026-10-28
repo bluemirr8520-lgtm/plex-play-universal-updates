@@ -674,6 +674,9 @@ fun VlcPlayerScreen(
         resolveVlcSubtitleTypeface(context, subtitleStyle.font, customFontFile)
     }
     val subtitleDrag = remember(source.playbackId, source.url, subtitleStyle) { SubtitleDragState() }
+    var longPressSubtitleMoving by remember(source.playbackId, source.url) { mutableStateOf(false) }
+    var longPressSubtitleText by remember(source.playbackId, source.url) { mutableStateOf("") }
+    val displayedSubtitleText = if (longPressSubtitleMoving) longPressSubtitleText else appSubtitleText
     val subtitleDragPreview = subtitleDrag.preview
     val sharedSubtitleAppearance = remember(subtitleStyle, subtitleDragPreview) {
         subtitleStyle.toSharedSubtitleAppearance().let { appearance ->
@@ -1734,7 +1737,7 @@ fun VlcPlayerScreen(
                     var zoomAmount = 1f
                     while (true) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
-                        if (event.changes.count { it.pressed } >= 2) {
+                        if (event.changes.count { it.pressed } >= 2 && !longPressSubtitleMoving) {
                             pinchStarted = true
                             val eventZoom = event.calculateZoom()
                             if (eventZoom.isFinite() && eventZoom > 0f) zoomAmount *= eventZoom
@@ -1758,6 +1761,25 @@ fun VlcPlayerScreen(
                     }
                 }
             }
+            .subtitleLongPressDrag(
+                enabled = !settingsVisible && ((useAppSubtitleOverlay && appSubtitleText.isNotBlank()) || longPressSubtitleMoving),
+                appearance = sharedSubtitleAppearance,
+                onStart = {
+                    cancelRemoteSeek()
+                    longPressSubtitleText = appSubtitleText
+                    longPressSubtitleMoving = true
+                    subtitleDrag.start(subtitleStyle.horizontalOffsetPercent, subtitleStyle.verticalOffsetPercent)
+                    showGestureFeedback("자막을 끌어 이동하세요")
+                },
+                onMove = { x, y, width, height -> subtitleDrag.move(x, y, width, height) },
+                onFinish = {
+                    subtitleDrag.finish()?.let { position ->
+                        applySubtitleStyleChange(subtitleStyle.copy(horizontalOffsetPercent = position.horizontal, verticalOffsetPercent = position.vertical))
+                    }
+                    longPressSubtitleMoving = false
+                },
+                onCancel = { subtitleDrag.cancel(); longPressSubtitleMoving = false },
+            )
             .pointerInput(
                 source.ratingKey,
                 source.url,
@@ -1936,15 +1958,15 @@ fun VlcPlayerScreen(
             modifier = Modifier.fillMaxSize(),
         )
 
-        if (useAppSubtitleOverlay) {
+        if (useAppSubtitleOverlay || longPressSubtitleMoving) {
             HorizontalSubtitleOverlay(
-                text = appSubtitleText,
+                text = displayedSubtitleText,
                 typeface = styledSubtitleTypeface,
                 appearance = sharedSubtitleAppearance,
                 modifier = Modifier.fillMaxSize(),
             )
             VerticalSubtitleOverlay(
-                text = appSubtitleText,
+                text = displayedSubtitleText,
                 typeface = styledSubtitleTypeface,
                 appearance = sharedSubtitleAppearance,
                 modifier = Modifier.fillMaxSize(),

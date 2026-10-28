@@ -11,12 +11,14 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  UNIVERSAL_TAG: v1.0.44
-  UNIVERSAL_VERSION: 1.0.44
-  UNIVERSAL_VERSION_CODE: "45"
+  UNIVERSAL_TAG: v1.0.45
+  UNIVERSAL_VERSION: 1.0.45
+  UNIVERSAL_VERSION_CODE: "46"
   EXPECTED_UNIT_TESTS: "464"
   # The build dependency was preserved on the retained release during cleanup.
   LIBVLC_SOURCE_TAG: v1.0.31
+  MPV_SOURCE_TAG: v1.0.45
+  EXPECTED_MPV_SOURCE_SHA256: cf46c33114dc473ed8e2297f02e820ed6842c9dab7ea441d241e9ecf0e39794
   EXPECTED_CERT_SHA256: 74c178f3841343954e4a6c74223c4ef06df5cef270485c557d4f915f389845e2
   EXPECTED_LIBVLC_SHA256: 2c25507adb1260aa4d81aad8c2ce98765d98026b9381f49ea454d0b8092f21cb
 
@@ -139,6 +141,17 @@ jobs:
             "$EXPECTED_LIBVLC_SHA256"
           cp "$asset_dir/libvlc-all-3.7.5.aar" source/app/libs/
 
+      - name: Download and verify MPV corresponding source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$MPV_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir dist --pattern "PlexPlayUniversal-mpv-native-source.zip"
+          test "$(sha256sum dist/PlexPlayUniversal-mpv-native-source.zip | awk '{print $1}')" = \
+            "$EXPECTED_MPV_SOURCE_SHA256"
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
@@ -238,6 +251,7 @@ jobs:
           gh release create "$UNIVERSAL_TAG" \
             dist/PlexPlayUniversal.apk \
             dist/PlexPlayUniversal.apk.sha256 \
+            dist/PlexPlayUniversal-mpv-native-source.zip \
             dist/README.md \
             dist/USER_GUIDE.md \
             "dist/BUILD_VERIFICATION_$UNIVERSAL_VERSION.md" \
@@ -270,6 +284,7 @@ jobs:
           assets=(
             PlexPlayUniversal.apk
             PlexPlayUniversal.apk.sha256
+            PlexPlayUniversal-mpv-native-source.zip
             README.md
             USER_GUIDE.md
             "BUILD_VERIFICATION_$UNIVERSAL_VERSION.md"
@@ -291,7 +306,7 @@ jobs:
             cd "$verification_dir"
             sha256sum -c PlexPlayUniversal.apk.sha256
           )
-          echo "All six draft assets match the locally verified files byte-for-byte."
+          echo "All seven draft assets match the locally verified files byte-for-byte."
 
       - name: Publish only the verified draft for the unchanged main commit
         env:
@@ -325,7 +340,7 @@ jobs:
             printf -- '- JVM tests: %s passed, none failed or skipped.\n' "$EXPECTED_UNIT_TESTS"
             printf -- '- Android UI tests compiled; CI does not claim device execution.\n'
             printf -- '- Verified package, version, fixed signing certificate and 16 KiB ZIP alignment.\n'
-            printf -- '- All six assets were downloaded and compared before publication.\n'
+            printf -- '- All seven assets were downloaded and compared before publication.\n'
             printf -- '- APK SHA-256: `%s`\n' "$(sha256sum dist/PlexPlayUniversal.apk | awk '{print $1}')"
           } >> "$GITHUB_STEP_SUMMARY"
 

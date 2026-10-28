@@ -23,8 +23,8 @@ android {
         applicationId = "io.mirr.plexplay.universal"
         minSdk = 26
         targetSdk = 36
-        versionCode = 45
-        versionName = "1.0.44"
+        versionCode = 46
+        versionName = "1.0.45"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -70,6 +70,8 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
         jniLibs.useLegacyPackaging = true
+        // Both the VLC AAR and the MPV runtime ship the C++ runtime.
+        jniLibs.pickFirsts += "**/libc++_shared.so"
     }
 
     lint {

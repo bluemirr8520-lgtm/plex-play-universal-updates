@@ -104,6 +104,7 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import io.mirr.shynigsy.player.mpv.MpvPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -672,6 +673,7 @@ fun PlayerScreen(
     onPlaybackCompleted: (PlaybackSource, Long) -> Unit,
     onProgress: (PlaybackSource, Long, String) -> Unit,
     onPlaybackUnavailable: (Long) -> Unit,
+    useMpv: Boolean = false,
 ) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
@@ -702,14 +704,16 @@ fun PlayerScreen(
     var playerSubtitleText by remember { mutableStateOf("") }
     var manualSubtitleText by remember { mutableStateOf("") }
     var useNativeSubtitleRenderer by remember { mutableStateOf(false) }
-    val activeSubtitleText =
-        if (useNativeSubtitleRenderer) {
-            ""
-        } else {
-            playerSubtitleText.ifBlank { manualSubtitleText }
-        }
     var manualSubtitleIndex by remember(source.ratingKey, source.subtitles) {
         mutableStateOf(defaultSubtitleIndex(source.subtitles))
+    }
+    val manualTextSelected = manualSubtitleIndex
+        ?.let { source.subtitles.getOrNull(it) }
+        ?.isManualTextSubtitle() == true
+    val activeSubtitleText = when {
+        manualTextSelected -> manualSubtitleText
+        useNativeSubtitleRenderer -> ""
+        else -> playerSubtitleText
     }
     var manualSubtitleCues by remember(source.ratingKey, source.subtitles) {
         mutableStateOf(emptyList<ManualSubtitleCue>())
@@ -1170,7 +1174,40 @@ fun PlayerScreen(
             updateVideoScreenSettings(VideoScreenSettings())
         }
     }
-    val player = remember(source.url, initialPlaybackUrl) {
+    val preparedPlayer: Player? = remember(source.url, initialPlaybackUrl, useMpv) {
+        if (useMpv) {
+            var mpv: MpvPlayer? = null
+            try {
+                mpv = MpvPlayer(
+                    context,
+                    headers = mapOf("X-Plex-Token" to source.token),
+                    sourceDurationMs = source.durationMs,
+                )
+                mpv.apply {
+                    nativeSubtitleVisibility = false
+                    trackSelectionParameters = trackSelectionParameters.buildUpon()
+                        .setPreferredTextLanguages("ko", "kor")
+                        .setSelectUndeterminedTextLanguage(true)
+                        .setTrackTypeDisabled(
+                            C.TRACK_TYPE_TEXT,
+                            manualSubtitleIndex?.let { source.subtitles.getOrNull(it) }
+                                ?.isManualTextSubtitle() == true,
+                        ).build()
+                    setMediaItem(buildMediaItem(initialPlaybackUrl, source))
+                    if (source.resumePositionMs > 0) seekTo(source.resumePositionMs)
+                    prepare()
+                    playWhenReady = true
+                }
+            } catch (error: LinkageError) {
+                runCatching { mpv?.release() }
+                android.util.Log.w("PlexPlayUniversal", "MPV unavailable", error)
+                null
+            } catch (error: Exception) {
+                runCatching { mpv?.release() }
+                android.util.Log.w("PlexPlayUniversal", "MPV initialization failed", error)
+                null
+            }
+        } else {
         val httpFactory = DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(20_000)
@@ -1234,6 +1271,35 @@ fun PlayerScreen(
                 prepare()
                 playWhenReady = true
             }
+        }
+    }
+    if (preparedPlayer == null) {
+        LaunchedEffect(source.playbackId) { onPlaybackUnavailable(source.resumePositionMs) }
+        return
+    }
+    val player = preparedPlayer
+
+    LaunchedEffect(player, videoScaleMode) {
+        if (player is MpvPlayer) {
+            player.setVideoLayout(
+                keepAspect = videoScaleMode != VideoScaleMode.STRETCH,
+                crop = videoScaleMode == VideoScaleMode.FILL,
+            )
+        }
+    }
+
+    LaunchedEffect(player, tracksRevision, manualSubtitleIndex) {
+        if (player is MpvPlayer) {
+            val bitmapSelected = player.currentTracks.groups.any { group ->
+                group.type == C.TRACK_TYPE_TEXT && (0 until group.length).any { index ->
+                    val mime = group.getTrackFormat(index).sampleMimeType.orEmpty().lowercase()
+                    group.isTrackSelected(index) &&
+                        (mime.contains("pgs") || mime.contains("vobsub") || mime.contains("dvbsubs"))
+                }
+            }
+            val textDisabled = C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes
+            player.nativeSubtitleVisibility = bitmapSelected && !manualTextSelected && !textDisabled
+        }
     }
 
     LaunchedEffect(
@@ -1955,6 +2021,13 @@ fun PlayerScreen(
         rememberUpdatedState<(SubtitleAppearance) -> Unit>(
             ::updateSubtitleAppearance,
         )
+    val longPressSubtitleDrag = remember(source.playbackId) { SubtitleDragState() }
+    var longPressSubtitleMoving by remember(source.playbackId) { mutableStateOf(false) }
+    var longPressSubtitleText by remember(source.playbackId) { mutableStateOf("") }
+    val displayedSubtitleText = if (longPressSubtitleMoving) longPressSubtitleText else activeSubtitleText
+    val renderedSubtitleAppearance = longPressSubtitleDrag.preview?.let { position ->
+        subtitleAppearance.copy(horizontalOffsetPercent = position.horizontal, verticalOffsetPercent = position.vertical)
+    } ?: subtitleAppearance
 
     Box(
         Modifier
@@ -1976,7 +2049,7 @@ fun PlayerScreen(
                         val event = awaitPointerEvent(PointerEventPass.Initial)
                         val pressedCount =
                             event.changes.count { it.pressed }
-                        if (pressedCount >= 2) {
+                        if (pressedCount >= 2 && !longPressSubtitleMoving) {
                             pinchStarted = true
                             val eventZoom = event.calculateZoom()
                             if (eventZoom.isFinite() && eventZoom > 0f) {
@@ -2021,6 +2094,25 @@ fun PlayerScreen(
                     }
                 }
             }
+            .subtitleLongPressDrag(
+                enabled = !playerSettingsVisible && (activeSubtitleText.isNotBlank() || longPressSubtitleMoving),
+                appearance = renderedSubtitleAppearance,
+                onStart = {
+                    cancelRemoteSeek()
+                    longPressSubtitleText = activeSubtitleText
+                    longPressSubtitleMoving = true
+                    longPressSubtitleDrag.start(subtitleAppearance.horizontalOffsetPercent, subtitleAppearance.verticalOffsetPercent)
+                    showGestureFeedback("자막을 끌어 이동하세요")
+                },
+                onMove = { x, y, width, height -> longPressSubtitleDrag.move(x, y, width, height) },
+                onFinish = {
+                    longPressSubtitleDrag.finish()?.let { position ->
+                        updateSubtitleAppearance(subtitleAppearance.copy(horizontalOffsetPercent = position.horizontal, verticalOffsetPercent = position.vertical))
+                    }
+                    longPressSubtitleMoving = false
+                },
+                onCancel = { longPressSubtitleDrag.cancel(); longPressSubtitleMoving = false },
+            )
             .pointerInput(player, activity, audioManager, videoScaleMode) {
                 var startX = 0f
                 var startY = 0f
@@ -2293,7 +2385,7 @@ fun PlayerScreen(
                 }
                 it.isFocusable = !playerSettingsVisible
                 it.isFocusableInTouchMode = !playerSettingsVisible
-                it.player = player
+                it.player = controllerPlayer
                 it.setOnKeyListener { _, _, keyEvent ->
                     handlePlayerRemoteKey(keyEvent)
                 }
@@ -2312,15 +2404,15 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxSize(),
         )
         HorizontalSubtitleOverlay(
-            text = activeSubtitleText,
+            text = displayedSubtitleText,
             typeface = subtitleTypeface,
-            appearance = subtitleAppearance,
+            appearance = renderedSubtitleAppearance,
             modifier = Modifier.fillMaxSize(),
         )
         VerticalSubtitleOverlay(
-            text = activeSubtitleText,
+            text = displayedSubtitleText,
             typeface = subtitleTypeface,
-            appearance = subtitleAppearance,
+            appearance = renderedSubtitleAppearance,
             modifier = Modifier.fillMaxSize(),
         )
         AnimatedVisibility(
@@ -3159,7 +3251,7 @@ private fun buildVideoLayerPaint(
 }
 
 private fun selectDefaultSubtitleIfNeeded(
-    player: ExoPlayer,
+    player: Player,
     tracks: Tracks,
 ) {
     val parameters = player.trackSelectionParameters
@@ -3684,7 +3776,7 @@ private fun isKoreanSubtitle(language: String?, label: String?): Boolean {
 
 @Composable
 private fun SubtitleSettings(
-    player: ExoPlayer,
+    player: Player,
     subtitleTracks: List<SubtitleTrackOption>,
     sourceSubtitles: List<PlaybackSubtitle>,
     automaticSubtitleIndex: Int?,
@@ -3954,7 +4046,7 @@ private fun SubtitleSettings(
 
 @Composable
 private fun SubtitleTrackRow(
-    player: ExoPlayer,
+    player: Player,
     option: SubtitleTrackOption,
     textTrackDisabled: Boolean,
     hasTextOverride: Boolean,

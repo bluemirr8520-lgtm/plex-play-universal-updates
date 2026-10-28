@@ -12,8 +12,10 @@ import androidx.compose.ui.platform.LocalContext
 import io.mirr.plexplay.data.PlaybackQuality
 import io.mirr.plexplay.data.PlaybackSource
 import io.mirr.plexplay.data.matchesPlaybackCompletion
+import java.io.File
 
 private enum class UniversalPlaybackEngine {
+    MPV,
     MEDIA3,
     VLC,
 }
@@ -41,6 +43,10 @@ fun UniversalPlayerHost(
     onProgress: (PlaybackSource, Long, String) -> Unit,
 ) {
     val context = LocalContext.current
+    val mpvAvailable = remember(context) {
+        File(context.applicationInfo.nativeLibraryDir, "libmpv.so").isFile &&
+            File(context.applicationInfo.nativeLibraryDir, "libplayer.so").isFile
+    }
     val preferUniversalCodec = remember(context, source, playbackQuality) {
         shouldPreferUniversalCodec(
             playbackQuality = playbackQuality,
@@ -53,7 +59,9 @@ fun UniversalPlayerHost(
     }
     var engine by remember(source.playbackId, source.url, playbackQuality) {
         mutableStateOf(
-            if (preferUniversalCodec) {
+            if (mpvAvailable) {
+                UniversalPlaybackEngine.MPV
+            } else if (preferUniversalCodec) {
                 UniversalPlaybackEngine.VLC
             } else {
                 UniversalPlaybackEngine.MEDIA3
@@ -66,7 +74,9 @@ fun UniversalPlayerHost(
 
     LaunchedEffect(source.playbackId, source.url, playbackQuality, preferUniversalCodec) {
         engine =
-            if (preferUniversalCodec) {
+            if (mpvAvailable) {
+                UniversalPlaybackEngine.MPV
+            } else if (preferUniversalCodec) {
                 UniversalPlaybackEngine.VLC
             } else {
                 UniversalPlaybackEngine.MEDIA3
@@ -83,6 +93,28 @@ fun UniversalPlayerHost(
         if (matchesPlaybackCompletion(source, endedSource)) complete(position)
     }
     when (engine) {
+        UniversalPlaybackEngine.MPV -> PlayerScreen(
+            source = source.copy(resumePositionMs = fallbackPositionMs),
+            playbackQuality = playbackQuality,
+            hasPreviousPlayback = hasPreviousPlayback,
+            previousPlaybackTitle = previousPlaybackTitle,
+            hasNextPlayback = hasNextPlayback,
+            nextPlaybackTitle = nextPlaybackTitle,
+            autoPlayNext = autoPlayNext,
+            onPlaybackQualityChanged = onPlaybackQualityChanged,
+            onAutoPlayNextChanged = onAutoPlayNextChanged,
+            onPlayPrevious = onPlayPrevious,
+            onPlayNext = onPlayNext,
+            onClose = onClose,
+            onPlaybackCompleted = completeCurrent,
+            onProgress = onProgress,
+            useMpv = true,
+            onPlaybackUnavailable = { positionMs ->
+                fallbackPositionMs = positionMs
+                engine = UniversalPlaybackEngine.VLC
+            },
+        )
+
         UniversalPlaybackEngine.MEDIA3 -> PlayerScreen(
             source = source,
             playbackQuality = playbackQuality,
